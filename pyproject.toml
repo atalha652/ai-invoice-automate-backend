@@ -1,0 +1,25 @@
+[project]
+name = "ocr-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "bcrypt>=4.3.0",
+    "boto3>=1.40.6",
+    "dotenv>=0.9.9",
+    "fastapi>=0.116.1",
+    "jose>=1.0.0",
+    "markdown>=3.8.2",
+    "openai>=1.99.6",
+    "pdfkit>=1.0.0",
+    "pillow>=11.3.0",
+    "pydantic[email]>=2.11.7",
+    "pymongo>=4.14.0",
+    "pytesseract>=0.3.13",
+    "python-jose[cryptography]>=3.5.0",
+    "python-multipart>=0.0.20",
+    "reportlab>=4.4.3",
+    "uvicorn>=0.35.0",
+    "weasyprint>=66.0",
+]

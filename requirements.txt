@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+openai
+pillow
+pytesseract
+python-multipart
+markdown 
+weasyprint
+pdfkit
+bcrypt
+pymongo
+python-jose[cryptography]
+dotenv
+pydantic[email]
+boto3
+reportlab

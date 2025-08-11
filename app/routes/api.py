@@ -1,0 +1,619 @@
+
+from fastapi import APIRouter, File, UploadFile, HTTPException
+from PIL import Image
+import pytesseract
+import io
+import os
+import re
+from datetime import datetime
+from openai import OpenAI
+import os
+import os
+import bcrypt
+from datetime import datetime, timedelta
+import certifi
+from fastapi import APIRouter, HTTPException
+from enum import Enums
+import bcrypt
+from app.routes.auth import get_current_user
+from fastapi import FastAPI, HTTPException
+from pymongo import MongoClient
+from datetime import datetime, timedelta
+from fastapi.security import OAuth2PasswordBearer
+import certifi
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, EmailStr
+from datetime import datetime, timedelta
+import bcrypt
+from fastapi import APIRouter, File, UploadFile, Depends, Form, HTTPException
+from datetime import datetime
+from bson import ObjectId
+from fastapi import APIRouter, File, Form, Depends, HTTPException, UploadFile
+from datetime import datetime
+from bson import ObjectId
+import boto3
+from fastapi import APIRouter, File, UploadFile, HTTPException
+import json
+from PIL import Image
+import pytesseract
+import io
+import os
+import re
+from datetime import datetime
+from openai import OpenAI
+from fastapi import Form
+from PIL import Image
+import pytesseract
+import re
+from openai import OpenAI
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+from datetime import datetime
+import re
+import json
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import (
+    SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, 
+    PageBreak
+)
+# Set Tesseract path (Windows)
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+
+MONGO_URI = os.getenv("MONGO_URI")
+DB_NAME = os.getenv("DB_NAME")
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id= AWS_SECRET_KEY,
+    aws_secret_access_key= AWS_SECRET_KEY,
+    region_name="eu-north-1"
+)
+
+bucket_name = "ai-auto-invoice"
+
+
+
+client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+db = client[DB_NAME]
+projects_collection = db["projects"]
+ocr_collection = db["ocr"]  # Replace 'db' with your actual DB object
+report_collection = db["report"]
+invoice_collection = db["e-invoice"]
+
+
+router = APIRouter()
+
+# OpenAI client
+clients = OpenAI(OPENAI_KEY)
+
+
+# OpenAI client
+
+
+# ---------------- OCR CLEANING ---------------- #
+def clean_ocr_text(raw_text: str) -> str:
+    """Clean OCR extracted text and fix common issues."""
+    text = re.sub(r'\n+', '\n', raw_text)  # collapse multiple newlines
+    text = re.sub(r'[ \t]+', ' ', text)  # collapse multiple spaces
+    text = text.strip()
+
+    # Fix common OCR errors
+    corrections = {
+        r'jank Name': 'Bank Name',
+        r'\\ccount': 'Account',
+        r'ase make the payment': 'Please make the payment',
+        r'\bO H W\b': 'OHW'
+    }
+    for wrong, right in corrections.items():
+        text = re.sub(wrong, right, text, flags=re.IGNORECASE)
+
+    # Merge broken lines that are part of same sentence
+    text = re.sub(r'(?<=\w)\n(?=\w)', ' ', text)
+
+    return text
+
+
+# ---------------- LLM HTML GENERATION ---------------- #
+def send_to_llm(text: str) -> str:
+    prompt = f"""
+You are a professional invoice extraction assistant familiar with **Spanish VAT rules**.
+
+Your task:
+Extract structured invoice data from the given invoice text and compute VAT correctly.
+
+📌 Spanish VAT Rules:
+- Apply **21%** for general goods and services (default).
+- Apply **10%** for hotel, transport, some food.
+- Apply **4%** for books, newspapers, basic food, medicine.
+- Apply **0% (Exempt)** for healthcare, education, financial services.
+- If unsure, use 21%.
+
+📐 Rules for Calculations:
+- Always calculate:
+  - total = sum of all item subtotals
+  - VAT_rate = numeric value (e.g., 21.0)
+  - VAT_amount = round(total * VAT_rate / 100, 2)
+  - Total_with_Tax = round(total + VAT_amount, 2)
+- If VAT_rate = 0, VAT_amount must be 0 and Total_with_Tax = total.
+
+🧾 Output format (as valid JSON, no extra text):
+{{
+  "supplier": {{
+    "business_name": "...",
+    "address_line1": "...",
+    "address_line2": "...",
+    "Email": "..."
+  }},
+  "customer": {{
+    "company_name": "...",
+    "address_line1": "...",
+    "address_line2": "...",
+    "Email": "..."
+  }},
+  "invoice": {{
+    "invoice_number": "...",
+    "invoice_date": "...",
+    "due_date": "...",
+    "amount_in_words": "..."
+  }},
+  "items": [
+    {{"description": "...", "qty": 0, "unit_price": 0.0, "subtotal": 0.0}}
+  ],
+  "totals": {{
+    "total": 0.0,
+    "VAT_rate": 0.0,
+    "VAT_amount": 0.0,
+    "Total_with_Tax": 0.0
+  }}
+}}
+
+📄 Invoice text:
+{text}
+"""
+
+    response = clients.chat.completions.create(
+        model="gpt-4-1106-preview",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+
+    return response.choices[0].message.content.strip()
+
+def generate_invoice_from_json(invoice_data, filename):
+    pdf = SimpleDocTemplate(filename, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    elements = []
+    styles = getSampleStyleSheet()
+
+    # Custom styles
+    styles.add(ParagraphStyle(name='RightAlign', parent=styles['Normal'], alignment=TA_RIGHT))
+    styles.add(ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold'))
+    styles.add(ParagraphStyle(name='MetaInfo', parent=styles['Normal'], spaceAfter=6))
+    styles.add(ParagraphStyle(name='InvoiceTitle', parent=styles['Title'], fontSize=24, leading=28))
+
+    # Title
+    elements.append(Paragraph("INVOICE", styles['InvoiceTitle']))
+    elements.append(Spacer(1, 20))
+
+    # FROM and TO sections
+    supplier = invoice_data.get("supplier", {})
+    customer = invoice_data.get("customer", {})
+    from_info = Paragraph(
+        f"""
+        {supplier.get("business_name", "")}<br/>
+        {supplier.get("address_line1", "")}<br/>
+        {supplier.get("address_line2", "")}<br/>
+        Email: {supplier.get("phone", "")}""",
+        styles['Normal']
+    )
+
+    to_info = Paragraph(
+        f"""
+        {customer.get("company_name", "")}<br/>
+        {customer.get("address_line1", "")}<br/>
+        {customer.get("address_line2", "")}<br/>
+        Email: {customer.get("tax_number", "")}""",
+        styles['Normal']
+    )
+
+    info_table = Table([[from_info, to_info]], colWidths=[260, 260])
+    info_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+    ]))
+    elements.append(info_table)
+    elements.append(Spacer(1, 20))
+
+    # Invoice Metadata
+    invoice = invoice_data.get("invoice", {})
+    meta_table = Table([
+        ["N.º de factura:", invoice.get("invoice_number", "")],
+        ["Fecha de factura:", invoice.get("invoice_date", "")],
+        ["Importe en palabras:", invoice.get("amount_in_words", "")]
+    ], colWidths=[120, 380])
+    meta_table.setStyle(TableStyle([
+        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(meta_table)
+    elements.append(Spacer(1, 20))
+
+    # Itemized Table
+    table_data = [['#', 'Descripción', 'Cantidad', 'Precio unitario', 'Total']]
+    items = invoice_data.get("items", [])
+    for idx, item in enumerate(items, start=1):
+        table_data.append([
+            idx,
+            item.get("description", ""),
+            item.get("qty", ""),
+            f"{item.get('unit_price', 0):,.2f}",
+            f"{item.get('subtotal', 0):,.2f}"
+        ])
+
+    # Grand total row
+    totals = invoice_data.get("totals", {})
+
+    table_data.append(["", "", "", "Total general:", f"{totals.get('total', 0):,.2f}"])
+    table_data.append(["", "", "", "IVA:", totals.get('VAT_rate', '0%')])
+    table_data.append(["", "", "", "Importe del IVA:", totals.get('VAT_amount')])
+    table_data.append(["", "", "", "Total con impuestos:", f"{totals.get('Total_with_Tax', 0):,.2f}"])
+
+    # Create and style item table
+    table = Table(table_data, hAlign='LEFT', colWidths=[30, 230, 70, 100, 100])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#003366")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTSIZE', (0, 0), (-1, 0), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('BACKGROUND', (0, 1), (-1, -2), colors.whitesmoke),
+        ('BACKGROUND', (-2, -1), (-1, -1), colors.lightgrey),
+        ('FONTNAME', (-2, -1), (-1, -1), 'Helvetica-Bold'),
+        ('TOPPADDING', (-2, -1), (-1, -1), 10),
+        ('BOTTOMPADDING', (-2, -1), (-1, -1), 10),
+    ]))
+
+    elements.append(table)
+    elements.append(Spacer(1, 30))
+
+    # Footer
+    elements.append(Paragraph("Thank you for your business!", styles['Italic']))
+    pdf.build(elements)
+    print(f"✅ Invoice generated: {filename}")
+# ---------------- LLM HTML GENERATION ---------------- #
+def clean_json_string(json_text: str) -> str:
+    # Remove inline comments starting with //
+    json_text = re.sub(r'//.*', '', json_text)
+    # Remove ```json or ``` markers
+    json_text = re.sub(r'```(?:json)?', '', json_text)
+    # Keep only the part from the first { to the last }
+    match = re.search(r'\{.*\}', json_text, re.DOTALL)
+    if match:
+        json_text = match.group(0)
+    else:
+        raise ValueError("No valid JSON object found in text")
+    return json_text.strip()
+
+import tempfile
+
+
+@router.post("/ocr")
+async def extract_text_from_s3(
+    user_id: str = Form(...),
+    project_id: str = Form(...)
+):
+    try:
+        # Step 1: Find the first image in the Package folder
+        package_prefix = f"{user_id}/{project_id}/Images/Package/"
+        response = s3.list_objects_v2(Bucket=bucket_name, Prefix=package_prefix)
+
+        if 'Contents' not in response or len(response['Contents']) == 0:
+            raise HTTPException(status_code=404, detail="No image found in Package folder")
+
+        image_key = None
+        for obj in response['Contents']:
+            if not obj['Key'].endswith("/"):
+                image_key = obj['Key']
+                break
+
+        if not image_key:
+            raise HTTPException(status_code=404, detail="No valid image file found")
+
+        # Step 2: Download image from S3
+        img_stream = io.BytesIO()
+        s3.download_fileobj(bucket_name, image_key, img_stream)
+        img_stream.seek(0)
+
+        # Step 3: OCR
+        image = Image.open(img_stream)
+        extracted_text = pytesseract.image_to_string(image)
+        cleaned_text = clean_ocr_text(extracted_text)
+
+        # Step 4: LLM invoice
+        llm_raw = send_to_llm(cleaned_text)
+        # llm_html = clean_llm_html(llm_raw)
+        cleaned = clean_json_string(llm_raw)
+        invoice_data = json.loads(cleaned)
+        # Step 5: Save PDF locally
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pdf_filename = f"invoice_{timestamp}.pdf"
+        pdf_path = os.path.join("invoices", pdf_filename)
+        os.makedirs("invoices", exist_ok=True)
+        generate_invoice_from_json(invoice_data,pdf_path)
+        # html_to_pdf(llm_html, pdf_path)
+        # Step 6: Upload PDF to S3 in Result folder
+        result_key = f"{user_id}/{project_id}/Images/Result/{pdf_filename}"
+        s3.upload_file(
+            Filename=pdf_path,
+            Bucket=bucket_name,
+            Key=result_key,
+            ExtraArgs={
+                "ContentType": "application/pdf",
+                "ContentDisposition": "inline"
+            }
+        )
+
+
+        package_url = s3.generate_presigned_url(
+                            'get_object',
+                            Params={
+                                'Bucket': bucket_name,
+                                'Key': image_key,
+                                'ResponseContentType': 'image/jpeg'
+                            },
+                            ExpiresIn=86400
+                        )
+
+        result_url = s3.generate_presigned_url(
+            'get_object',
+            Params={
+                                'Bucket': bucket_name,
+                                'Key': result_key,
+                                'ResponseContentType': 'application/pdf'
+                            },
+            ExpiresIn=86400
+        )
+        report_doc = {
+        "user_id": user_id,
+        "project_id": project_id,
+        "created_at": datetime.utcnow(),
+        **invoice_data  # Merge all invoice fields
+    }
+        report_collection.insert_one(report_doc)
+        # Step 8: Save to MongoDB (OCR collection)
+        ocr = ocr_collection.insert_one({
+            "user_id": user_id,
+            "project_id": project_id,
+            "result_key": result_key,
+            "package_key": image_key,
+            "pdf_text": cleaned,
+            "status": "Success",
+            "created_at": datetime.utcnow()
+        })
+        ocr_id = str(ocr.inserted_id)
+    
+        # Step 9: Update project collection with totals
+        projects_collection.update_one(
+            {"_id": ObjectId(project_id)},
+            {
+                "$set": {
+                    "status": "Success",
+                    "result_key": result_key,
+                    "package_url": package_url,
+                    "result_url": result_url
+                }
+            }
+        )
+
+        # Remove temp file
+        os.remove(pdf_path)
+
+        return {
+            "ocr_id":ocr_id,
+            "project_id": project_id,
+            "user_id": user_id,
+            "package_url": package_url,
+            "result_url": result_url,
+            "ocr_text": cleaned_text,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+import xml.etree.ElementTree as ET
+@router.post("/xml")
+async def extract_text_from_s3(
+    user_id: str = Form(...),
+    project_id: str = Form(...)
+):
+    # 1️⃣ Get latest OCR document
+    ocr_doc = ocr_collection.find_one(
+        {"user_id": user_id, "project_id": project_id},
+        sort=[("created_at", -1)]
+    )
+
+    if not ocr_doc:
+        raise HTTPException(status_code=404, detail="No OCR data found for this project.")
+
+    pdf_text = ocr_doc.get("pdf_text")
+    if not pdf_text:
+        raise HTTPException(status_code=404, detail="No PDF text found in OCR data.")
+
+    # 2️⃣ Create XML using LLM
+    prompt = f"""
+You are an expert in structured invoice data extraction and XML formatting.
+
+Your task:
+Convert the given invoice text into **pure, valid XML** in the **Facturae 3.2.1 format**.
+
+Strict Rules:
+1. Output **only** valid XML — no explanations, comments, or extra text.
+2. The XML must start with the declaration:
+   <?xml version="1.0" encoding="UTF-8"?>
+3. The root element must be:
+   <fe:Facturae xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+                xmlns:fe="http://www.facturae.es/Facturae/2014/v3.2.1/Facturae">
+4. Escape all special XML characters (`&`, `<`, `>`, `"`, `'`) properly.
+5. Preserve **all available details** from the text — do not omit any field.
+6. If a value is missing in the source text, leave the tag empty but keep it present.
+7. Follow the XML structure shown in the example exactly, replacing placeholders with extracted values.
+8. Keep numeric values without currency symbols, formatted with `.` as decimal separator.
+9. Keep dates in ISO format (YYYY-MM-DD).
+
+Example XML structure:
+<?xml version="1.0" encoding="UTF-8"?>
+<fe:Facturae xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+    xmlns:fe="http://www.facturae.es/Facturae/2014/v3.2.1/Facturae">
+    <FileHeader>
+        <SchemaVersion>3.2.1</SchemaVersion>
+        <Modality>I</Modality>
+        <InvoiceIssuerType>EM</InvoiceIssuerType>
+        <Batch>
+            <BatchIdentifier>BATCH_IDENTIFIER</BatchIdentifier>
+            <InvoicesCount>1</InvoicesCount>
+            <TotalInvoicesAmount>
+                <TotalAmount>INVOICE_TOTAL</TotalAmount>
+            </TotalInvoicesAmount>
+            <TotalOutstandingAmount>
+                <TotalAmount>INVOICE_BALANCE_DUE</TotalAmount>
+            </TotalOutstandingAmount>
+            <TotalExecutableAmount>
+                <TotalAmount>INVOICE_BALANCE_DUE</TotalAmount>
+            </TotalExecutableAmount>
+            <InvoiceCurrencyCode>CURRENCY_CODE</InvoiceCurrencyCode>
+        </Batch>
+    </FileHeader>
+    <Parties>
+        <SellerParty>
+            <TaxIdentification>
+                <PersonTypeCode>J</PersonTypeCode>
+                <ResidenceTypeCode>R</ResidenceTypeCode>
+                <TaxIdentificationNumber>COMPANY_VAT_NUMBER</TaxIdentificationNumber>
+            </TaxIdentification>
+            <LegalEntity>
+                <CorporateName>COMPANY_NAME</CorporateName>
+                <AddressInSpain>
+                    <Address>COMPANY_ADDRESS</Address>
+                    <PostCode>COMPANY_ZIP</PostCode>
+                    <Town>COMPANY_CITY_NAME</Town>
+                    <Province>COMPANY_STATE</Province>
+                    <CountryCode>COMPANY_COUNTRY_CODE</CountryCode>
+                </AddressInSpain>
+            </LegalEntity>
+        </SellerParty>
+        <BuyerParty>
+            <TaxIdentification>
+                <PersonTypeCode>J</PersonTypeCode>
+                <ResidenceTypeCode>R</ResidenceTypeCode>
+                <TaxIdentificationNumber>CLIENT_VAT_NUMBER</TaxIdentificationNumber>
+            </TaxIdentification>
+            <LegalEntity>
+                <CorporateName>CLIENT_NAME</CorporateName>
+                <AddressInSpain>
+                    <Address>CLIENT_ADDRESS</Address>
+                    <PostCode>CLIENT_ZIP</PostCode>
+                    <Town>CLIENT_CITY</Town>
+                    <Province>CLIENT_STATE</Province>
+                    <CountryCode>CLIENT_COUNTRY_CODE_ALPHA_3</CountryCode>
+                </AddressInSpain>
+            </LegalEntity>
+        </BuyerParty>
+    </Parties>
+    <Invoices>
+        <Invoice>
+            <InvoiceHeader>
+                <InvoiceNumber>INVOICE_ID</InvoiceNumber>
+                <InvoiceSeriesCode>F</InvoiceSeriesCode>
+                <InvoiceDocumentType>FC</InvoiceDocumentType>
+                <InvoiceClass>OO</InvoiceClass>
+            </InvoiceHeader>
+            <InvoiceIssueData>
+                <IssueDate>INVOICE_BILL_DATE</IssueDate>
+                <InvoiceCurrencyCode>CURRENCY_CODE</InvoiceCurrencyCode>
+                <TaxCurrencyCode>CURRENCY_CODE</TaxCurrencyCode>
+                <LanguageName>es</LanguageName>
+            </InvoiceIssueData>
+            <TaxesOutputs>
+                <Tax>
+                    <TaxTypeCode>01</TaxTypeCode>
+                    <TaxRate>TAX1_PERCENT</TaxRate>
+                    <TaxableBase>
+                        <TotalAmount>INVOICE_TAXABLE_SUBTOTAL</TotalAmount>
+                    </TaxableBase>
+                    <TaxAmount>
+                        <TotalAmount>TAX_TOTAL_AMOUNT</TotalAmount>
+                    </TaxAmount>
+                </Tax>
+                <Tax>
+                    <TaxTypeCode>01</TaxTypeCode>
+                    <TaxRate>0</TaxRate>
+                    <TaxableBase>
+                        <TotalAmount>INVOICE_NON_TAXABLE_SUBTOTAL</TotalAmount>
+                    </TaxableBase>
+                    <TaxAmount>
+                        <TotalAmount>0</TotalAmount>
+                    </TaxAmount>
+                </Tax>
+            </TaxesOutputs>
+            <InvoiceTotals>
+                <TotalGrossAmount>INVOICE_SUBTOTAL</TotalGrossAmount>
+                <TotalGeneralDiscounts>INVOICE_DISCOUNT_TOTAL</TotalGeneralDiscounts>
+                <TotalGeneralSurcharges>0</TotalGeneralSurcharges>
+                <TotalGrossAmountBeforeTaxes>INVOICE_SUBTOTAL</TotalGrossAmountBeforeTaxes>
+                <TotalTaxOutputs>TAX_TOTAL_AMOUNT</TotalTaxOutputs>
+                <TotalTaxesWithheld>0.0</TotalTaxesWithheld>
+                <InvoiceTotal>INVOICE_TOTAL</InvoiceTotal>
+                <TotalOutstandingAmount>INVOICE_BALANCE_DUE</TotalOutstandingAmount>
+                <TotalExecutableAmount>INVOICE_BALANCE_DUE</TotalExecutableAmount>
+            </InvoiceTotals>
+            <Items>
+                <InvoiceLine>
+                    <ItemDescription>INVOICE_LINE_TITLE</ItemDescription>
+                    <Quantity>INVOICE_LINE_QUANTITY</Quantity>
+                    <UnitPriceWithoutTax>INVOICE_LINE_RATE</UnitPriceWithoutTax>
+                    <TotalCost>INVOICE_LINE_TOTAL</TotalCost>
+                    <GrossAmount>INVOICE_LINE_TOTAL</GrossAmount>
+                    <TaxesOutputs>
+                        <Tax>
+                            <TaxTypeCode>01</TaxTypeCode>
+                            <TaxRate>INVOICE_LINE_TAX1_PERCENT</TaxRate>
+                            <TaxableBase>
+                                <TotalAmount>INVOICE_LINE_TOTAL</TotalAmount>
+                            </TaxableBase>
+                            <TaxAmount>
+                                <TotalAmount>INVOICE_LINE_TAX_TOTAL</TotalAmount>
+                            </TaxAmount>
+                        </Tax>
+                    </TaxesOutputs>
+                </InvoiceLine>
+            </Items>
+        </Invoice>
+    </Invoices>
+</fe:Facturae>
+
+Input Invoice Text:
+{pdf_text}
+"""
+
+
+    response = clients.responses.create(
+        model="gpt-4.1",
+        input=prompt
+    )
+
+    xml_output = response.output_text if hasattr(response, "output_text") else str(response)
+    invoice_collection.insert_one({
+            "user_id": user_id,
+            "project_id": project_id,
+            "invoice":xml_output,
+            "created_at": datetime.utcnow()
+        })
+    return {
+        "message": "XML file created & uploaded successfully",
+        # "s3_url": xml_url,
+        "xml_preview": xml_output # preview for debugging
+    }
