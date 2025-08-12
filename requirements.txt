@@ -10,7 +10,8 @@ pdfkit
 bcrypt
 pymongo
 python-jose[cryptography]
-dotenv
+python-dotenv
 pydantic[email]
 boto3
+google-genai
 reportlab

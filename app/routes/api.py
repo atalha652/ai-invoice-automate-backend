@@ -3,72 +3,60 @@ from fastapi import APIRouter, File, UploadFile, HTTPException
 from PIL import Image
 import pytesseract
 import io
+import tempfile
+from google import genai
+from google.genai import types
 import os
 import re
-from datetime import datetime
+import xml.etree.ElementTree as ET
 from openai import OpenAI
-import os
-import os
 import bcrypt
 from datetime import datetime, timedelta
 import certifi
-from fastapi import APIRouter, HTTPException
 import bcrypt
 from app.routes.auth import get_current_user
 from fastapi import FastAPI, HTTPException
 from pymongo import MongoClient
-from datetime import datetime, timedelta
 from fastapi.security import OAuth2PasswordBearer
 import certifi
-from fastapi import APIRouter, HTTPException
+from dotenv import load_dotenv
 from pydantic import BaseModel, EmailStr
-from datetime import datetime, timedelta
 import bcrypt
 from fastapi import APIRouter, File, UploadFile, Depends, Form, HTTPException
-from datetime import datetime
 from bson import ObjectId
 from fastapi import APIRouter, File, Form, Depends, HTTPException, UploadFile
-from datetime import datetime
 from bson import ObjectId
 import boto3
 from fastapi import APIRouter, File, UploadFile, HTTPException
 import json
 from PIL import Image
-import pytesseract
 import io
 import os
-import re
-from datetime import datetime
 from openai import OpenAI
 from fastapi import Form
 from PIL import Image
-import pytesseract
-import re
 from openai import OpenAI
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
-from datetime import datetime
-import re
 import json
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import (
     SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, 
     PageBreak
 )
-# Set Tesseract path (Windows)
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
+load_dotenv()
+# Set Tesseract path (Windows)
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME")
 s3 = boto3.client(
     "s3",
-    aws_access_key_id= AWS_SECRET_KEY,
-    aws_secret_access_key= AWS_SECRET_KEY,
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     region_name="eu-north-1"
 )
 
@@ -88,9 +76,6 @@ router = APIRouter()
 
 # OpenAI client
 clients = OpenAI(api_key=OPENAI_KEY)
-
-
-# OpenAI client
 
 
 # ---------------- OCR CLEANING ---------------- #
@@ -297,9 +282,19 @@ def clean_json_string(json_text: str) -> str:
         raise ValueError("No valid JSON object found in text")
     return json_text.strip()
 
-import tempfile
-
-
+def OCR(image_bytes: bytes) -> str:
+    client = genai.Client(api_key=os.getenv("GENAI_API_KEY"))
+    response = client.models.generate_content(
+        model='gemini-1.5-flash',
+        contents=[
+            types.Part.from_bytes(
+                data=image_bytes,
+                mime_type='image/jpeg',
+            ),
+            'Extract all text from this image.'
+        ]
+    )
+    return response.text
 @router.post("/ocr")
 async def extract_text_from_s3(
     user_id: str = Form(...),
@@ -328,8 +323,7 @@ async def extract_text_from_s3(
         img_stream.seek(0)
 
         # Step 3: OCR
-        image = Image.open(img_stream)
-        extracted_text = pytesseract.image_to_string(image)
+        extracted_text = OCR(img_stream.getvalue())
         cleaned_text = clean_ocr_text(extracted_text)
 
         # Step 4: LLM invoice
@@ -423,7 +417,7 @@ async def extract_text_from_s3(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-import xml.etree.ElementTree as ET
+
 @router.post("/xml")
 async def extract_text_from_s3(
     user_id: str = Form(...),

@@ -1,5 +1,4 @@
 from fastapi import APIRouter, File, Depends, HTTPException
-from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr
 from pymongo import MongoClient
 from bson import ObjectId
@@ -7,16 +6,11 @@ import os
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Optional, List
-
 import bcrypt
 import certifi
 from jose import JWTError, jwt
-from bson import ObjectId
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, EmailStr
-from pymongo import MongoClient
 
 # -------------------- Load Environment Variables --------------------
 load_dotenv()
@@ -50,20 +44,19 @@ class OrgTypeResponse(BaseModel):
     name: str
 
 class OrganizationInfo(BaseModel):
-    org_name: str  # Company Name
+    type_id: Optional[str] = None   # dropdown selection
+    type_name: Optional[str] = None # custom user entry
+    company_name: Optional[str] = None
     address: Optional[str] = None
     phone: Optional[str] = None
-    type_id: Optional[str] = None   # Dropdown selection
-    type_name: Optional[str] = None # Custom user entry
 
 class UserCreate(BaseModel):
     name: str
     email: EmailStr
     password: str
     type: UserType
-    tax_id: Optional[str] = None  # <-- now available for all users
+    tax_id: Optional[str] = None  # Tax ID / VAT Number for all users
     organization_info: Optional[OrganizationInfo] = None
-
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -104,16 +97,16 @@ def signup(user: UserCreate):
 
     # Hash password
     hashed_pw = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt()).decode()
+
     # Prepare new user document
     new_user = {
-    "name": user.name,
-    "email": user.email.lower(),
-    "password_hash": hashed_pw,
-    "type": user.type,
-    "tax_id": user.tax_id,  # <-- save for both types
-    "created_at": datetime.utcnow()
+        "name": user.name,
+        "email": user.email.lower(),
+        "password_hash": hashed_pw,
+        "type": user.type,
+        "created_at": datetime.utcnow(),
+        "tax_id": user.tax_id  # Add tax_id for all users
     }
-
 
     # If organization, handle org type logic
     if user.type == UserType.organization and user.organization_info:
@@ -148,14 +141,12 @@ def signup(user: UserCreate):
             raise HTTPException(status_code=400, detail="Organization type is required")
 
         # Save organization info in user document
-        # Save organization info in user document
         new_user["organization_info"] = {
-            "org_name": user.organization_info.org_name,
+            "type": org_type["name"],
+            "company_name": user.organization_info.company_name,
             "address": user.organization_info.address,
             "phone": user.organization_info.phone,
-            "type": org_type["name"],
         }
-
 
     # Insert into database
     result = users_collection.insert_one(new_user)
