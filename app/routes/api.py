@@ -13,7 +13,6 @@ import bcrypt
 from datetime import datetime, timedelta
 import certifi
 from fastapi import APIRouter, HTTPException
-from enum import Enums
 import bcrypt
 from app.routes.auth import get_current_user
 from fastapi import FastAPI, HTTPException
@@ -88,7 +87,7 @@ invoice_collection = db["e-invoice"]
 router = APIRouter()
 
 # OpenAI client
-clients = OpenAI(OPENAI_KEY)
+clients = OpenAI(api_key=OPENAI_KEY)
 
 
 # OpenAI client

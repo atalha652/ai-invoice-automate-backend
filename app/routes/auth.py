@@ -50,17 +50,20 @@ class OrgTypeResponse(BaseModel):
     name: str
 
 class OrganizationInfo(BaseModel):
-    org_name: str
-    type_id: Optional[str] = None   # dropdown selection
-    type_name: Optional[str] = None # custom user entry
-    website: Optional[str] = None
+    org_name: str  # Company Name
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    type_id: Optional[str] = None   # Dropdown selection
+    type_name: Optional[str] = None # Custom user entry
 
 class UserCreate(BaseModel):
     name: str
     email: EmailStr
     password: str
     type: UserType
+    tax_id: Optional[str] = None  # <-- now available for all users
     organization_info: Optional[OrganizationInfo] = None
+
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -101,15 +104,16 @@ def signup(user: UserCreate):
 
     # Hash password
     hashed_pw = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt()).decode()
-
     # Prepare new user document
     new_user = {
-        "name": user.name,
-        "email": user.email.lower(),
-        "password_hash": hashed_pw,
-        "type": user.type,
-        "created_at": datetime.utcnow()
+    "name": user.name,
+    "email": user.email.lower(),
+    "password_hash": hashed_pw,
+    "type": user.type,
+    "tax_id": user.tax_id,  # <-- save for both types
+    "created_at": datetime.utcnow()
     }
+
 
     # If organization, handle org type logic
     if user.type == UserType.organization and user.organization_info:
@@ -144,11 +148,14 @@ def signup(user: UserCreate):
             raise HTTPException(status_code=400, detail="Organization type is required")
 
         # Save organization info in user document
+        # Save organization info in user document
         new_user["organization_info"] = {
             "org_name": user.organization_info.org_name,
+            "address": user.organization_info.address,
+            "phone": user.organization_info.phone,
             "type": org_type["name"],
-            "website": user.organization_info.website
         }
+
 
     # Insert into database
     result = users_collection.insert_one(new_user)
@@ -161,12 +168,26 @@ def login(user: UserLogin):
     if not db_user or not bcrypt.checkpw(user.password.encode("utf-8"), db_user["password_hash"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
+    # Remove password from response
+    db_user["_id"] = str(db_user["_id"])
+    db_user.pop("password_hash", None)
+
     access_token = create_access_token(
         {"sub": str(db_user["_id"])},
         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    return {"message": "User logged in successfully", "access_token": access_token, "token_type": "bearer"}
-    
+
+    return {
+        "message": "User logged in successfully",
+        "access_token": access_token,
+        "token_type": "bearer",
+        "name": db_user["name"],
+        "email": db_user["email"],
+        "user_id": db_user["_id"],
+        "tax_id": db_user["tax_id"],
+        "organization_info": db_user.get("organization_info", {})
+    }
+
 # Get current logged-in user
 def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
