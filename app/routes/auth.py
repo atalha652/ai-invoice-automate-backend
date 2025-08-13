@@ -53,6 +53,7 @@ class OrganizationInfo(BaseModel):
 class UserCreate(BaseModel):
     name: str
     email: EmailStr
+    phone: Optional[str] = None
     password: str
     type: UserType
     tax_id: Optional[str] = None  # Tax ID / VAT Number for all users
@@ -103,6 +104,7 @@ def signup(user: UserCreate):
         "name": user.name,
         "email": user.email.lower(),
         "password_hash": hashed_pw,
+        "phone": user.phone,
         "type": user.type,
         "created_at": datetime.utcnow(),
         "tax_id": user.tax_id  # Add tax_id for all users
