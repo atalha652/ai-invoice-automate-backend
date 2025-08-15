@@ -147,7 +147,7 @@ async def create_project(
     # Step 3: Update the project with s3_key
     projects_collection.update_one(
         {"_id": result.inserted_id},
-        {"$set": {"package_key": s3_key}}
+        {"$set": {"package_url": package_url}}
     )
     user_id = str(current_user["_id"])
 
