@@ -154,15 +154,17 @@ async def create_project(
 
 
 
-@router.get("/my-projects")
-def get_projects(current_user: dict = Depends(get_current_user)):
-    projects = list(
-        projects_collection.find({"user_id": str(current_user["_id"])})
-    )
+@router.get("/{user_id}")
+def get_projects_by_user_id(user_id: str):
+    projects = list(projects_collection.find({"user_id": user_id}))
+    if not projects:
+        raise HTTPException(status_code=404, detail="No projects found for this user")
+    
+    # Convert ObjectId to string
     for p in projects:
         p["_id"] = str(p["_id"])
+    
     return {"projects": projects}
-
 
 
 
