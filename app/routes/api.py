@@ -396,7 +396,6 @@ async def extract_text_from_s3(
                 "$set": {
                     "status": "Success",
                     "result_key": result_key,
-                    "package_url": package_url,
                     "result_url": result_url
                 }
             }

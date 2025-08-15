@@ -135,7 +135,15 @@ async def create_project(
         file=file,
         folder_type="Package"
     )
-
+    package_url = s3.generate_presigned_url(
+                            'get_object',
+                            Params={
+                                'Bucket': bucket_name,
+                                'Key': s3_key,
+                                'ResponseContentType': 'image/jpeg'
+                            },
+                            ExpiresIn=86400
+                        )
     # Step 3: Update the project with s3_key
     projects_collection.update_one(
         {"_id": result.inserted_id},
@@ -149,6 +157,7 @@ async def create_project(
         "project_id": project_id,
         "user_id": user_id,
         "package_key": s3_key,
+        "package_url": package_url,
         "status": "pending"
     }
 
@@ -157,13 +166,14 @@ async def create_project(
 @router.get("/{user_id}")
 def get_projects_by_user_id(user_id: str):
     projects = list(projects_collection.find({"user_id": user_id}))
+
     if not projects:
-        raise HTTPException(status_code=404, detail="No projects found for this user")
-    
-    # Convert ObjectId to string
+        return {"projects": []}
+
+    # Convert ObjectId to string for JSON serialization
     for p in projects:
         p["_id"] = str(p["_id"])
-    
+
     return {"projects": projects}
 
 
