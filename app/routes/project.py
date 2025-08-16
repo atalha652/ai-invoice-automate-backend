@@ -101,66 +101,134 @@ class ProjectCreate(BaseModel):
 
 
 
+# @router.post("/create")
+# async def create_project(
+#     title: str = Form(...),
+#     description: str = Form(...),
+#     color: Optional[str] = Form(None),  # New color field
+#     file: UploadFile = File(...),
+#     current_user: dict = Depends(get_current_user)
+# ):
+#     # Validate file type
+#     if file.content_type not in ["image/png", "image/jpeg", "application/pdf"]:
+#         raise HTTPException(status_code=400, detail="Only image or PDF allowed")
+
+#     # Step 1: Save project with status "pending"
+#     new_project = {
+#         "user_id": str(current_user["_id"]),
+#         "title": title,
+#         "filename": file.filename,
+#         "filetype": file.content_type,
+#         "description": description,
+#         "color": color,  # Store color in DB
+#         "status": "pending",
+#         "created_at": datetime.utcnow()
+#     }
+
+#     result = projects_collection.insert_one(new_project)
+#     project_id = str(result.inserted_id)
+
+#     # Step 2: Upload to S3
+#     s3_key = upload_to_s3(
+#         user_id=str(current_user["_id"]),
+#         project_id=project_id,
+#         file=file,
+#         folder_type="Package"
+#     )
+#     package_url = s3.generate_presigned_url(
+#                             'get_object',
+#                             Params={
+#                                 'Bucket': bucket_name,
+#                                 'Key': s3_key,
+#                                 'ResponseContentType': 'image/jpeg'
+#                             },
+#                             ExpiresIn=86400
+#                         )
+#     # Step 3: Update the project with s3_key
+#     projects_collection.update_one(
+#         {"_id": result.inserted_id},
+#         {"$set": {"package_url": package_url}}
+#     )
+#     user_id = str(current_user["_id"])
+
+#     # Step 4: Return response
+#     return {
+#         "message": "Project created",
+#         "project_id": project_id,
+#         "user_id": user_id,
+#         "package_key": s3_key,
+#         "package_url": package_url,
+#         "status": "pending"
+#     }
+
+from typing import List, Optional
+from fastapi import APIRouter, File, UploadFile, Form, Depends, HTTPException
+from datetime import datetime
+
 @router.post("/create")
 async def create_project(
     title: str = Form(...),
     description: str = Form(...),
-    color: Optional[str] = Form(None),  # New color field
-    file: UploadFile = File(...),
+    color: Optional[str] = Form(None),
+    files: List[UploadFile] = File(...),   # Accept multiple files
     current_user: dict = Depends(get_current_user)
 ):
-    # Validate file type
-    if file.content_type not in ["image/png", "image/jpeg", "application/pdf"]:
-        raise HTTPException(status_code=400, detail="Only image or PDF allowed")
+    # Step 1: Validate all files
+    for file in files:
+        if file.content_type not in ["image/png", "image/jpeg", "application/pdf"]:
+            raise HTTPException(status_code=400, detail="Only image or PDF allowed")
 
-    # Step 1: Save project with status "pending"
+    # Step 2: Save project with status "pending"
     new_project = {
         "user_id": str(current_user["_id"]),
         "title": title,
-        "filename": file.filename,
-        "filetype": file.content_type,
         "description": description,
-        "color": color,  # Store color in DB
+        "color": color,
         "status": "pending",
-        "created_at": datetime.utcnow()
+        "created_at": datetime.utcnow(),
+        "files": []   # store multiple file records
     }
-
     result = projects_collection.insert_one(new_project)
     project_id = str(result.inserted_id)
 
-    # Step 2: Upload to S3
-    s3_key = upload_to_s3(
-        user_id=str(current_user["_id"]),
-        project_id=project_id,
-        file=file,
-        folder_type="Package"
-    )
-    package_url = s3.generate_presigned_url(
-                            'get_object',
-                            Params={
-                                'Bucket': bucket_name,
-                                'Key': s3_key,
-                                'ResponseContentType': 'image/jpeg'
-                            },
-                            ExpiresIn=86400
-                        )
-    # Step 3: Update the project with s3_key
+    # Step 3: Upload each file to S3
+    file_records = []
+    for file in files:
+        s3_key = upload_to_s3(
+            user_id=str(current_user["_id"]),
+            project_id=project_id,
+            file=file,
+            folder_type="Package"
+        )
+        file_url = s3.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': bucket_name,
+                'Key': s3_key,
+                'ResponseContentType': file.content_type
+            },
+            ExpiresIn=86400
+        )
+        file_records.append({
+            "name": file.filename,
+            "file_url": file_url,
+            "s3_key": s3_key
+        })
+
+    # Step 4: Update project with all file records
     projects_collection.update_one(
         {"_id": result.inserted_id},
-        {"$set": {"package_url": package_url}}
+        {"$set": {"files": file_records}}
     )
-    user_id = str(current_user["_id"])
 
-    # Step 4: Return response
+    # Step 5: Return response
     return {
         "message": "Project created",
         "project_id": project_id,
-        "user_id": user_id,
-        "package_key": s3_key,
-        "package_url": package_url,
+        "user_id": str(current_user["_id"]),
+        "files": file_records,
         "status": "pending"
     }
-
 
 
 @router.get("/{user_id}")

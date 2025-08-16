@@ -295,122 +295,236 @@ def OCR(image_bytes: bytes) -> str:
         ]
     )
     return response.text
+# @router.post("/ocr")
+# async def extract_text_from_s3(
+#     user_id: str = Form(...),
+#     project_id: str = Form(...)
+# ):
+#     try:
+#         # Step 1: Find the first image in the Package folder
+#         package_prefix = f"{user_id}/{project_id}/Images/Package/"
+#         response = s3.list_objects_v2(Bucket=bucket_name, Prefix=package_prefix)
+
+#         if 'Contents' not in response or len(response['Contents']) == 0:
+#             raise HTTPException(status_code=404, detail="No image found in Package folder")
+
+#         image_key = None
+#         for obj in response['Contents']:
+#             if not obj['Key'].endswith("/"):
+#                 image_key = obj['Key']
+#                 break
+
+#         if not image_key:
+#             raise HTTPException(status_code=404, detail="No valid image file found")
+
+#         # Step 2: Download image from S3
+#         img_stream = io.BytesIO()
+#         s3.download_fileobj(bucket_name, image_key, img_stream)
+#         img_stream.seek(0)
+
+#         # Step 3: OCR
+#         extracted_text = OCR(img_stream.getvalue())
+#         cleaned_text = clean_ocr_text(extracted_text)
+
+#         # Step 4: LLM invoice
+#         llm_raw = send_to_llm(cleaned_text)
+#         # llm_html = clean_llm_html(llm_raw)
+#         cleaned = clean_json_string(llm_raw)
+#         invoice_data = json.loads(cleaned)
+#         # Step 5: Save PDF locally
+#         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+#         pdf_filename = f"invoice_{timestamp}.pdf"
+#         pdf_path = os.path.join("invoices", pdf_filename)
+#         os.makedirs("invoices", exist_ok=True)
+#         generate_invoice_from_json(invoice_data,pdf_path)
+#         # html_to_pdf(llm_html, pdf_path)
+#         # Step 6: Upload PDF to S3 in Result folder
+#         result_key = f"{user_id}/{project_id}/Images/Result/{pdf_filename}"
+#         s3.upload_file(
+#             Filename=pdf_path,
+#             Bucket=bucket_name,
+#             Key=result_key,
+#             ExtraArgs={
+#                 "ContentType": "application/pdf",
+#                 "ContentDisposition": "inline"
+#             }
+#         )
+
+
+#         # package_url = s3.generate_presigned_url(
+#         #                     'get_object',
+#         #                     Params={
+#         #                         'Bucket': bucket_name,
+#         #                         'Key': image_key,
+#         #                         'ResponseContentType': 'image/jpeg'
+#         #                     },
+#         #                     ExpiresIn=86400
+#         #                 )
+
+#         result_url = s3.generate_presigned_url(
+#             'get_object',
+#             Params={
+#                                 'Bucket': bucket_name,
+#                                 'Key': result_key,
+#                                 'ResponseContentType': 'application/pdf'
+#                             },
+#             ExpiresIn=86400
+#         )
+#         report_doc = {
+#         "user_id": user_id,
+#         "project_id": project_id,
+#         "created_at": datetime.utcnow(),
+#         **invoice_data  # Merge all invoice fields
+#     }
+#         report_collection.insert_one(report_doc)
+#         # Step 8: Save to MongoDB (OCR collection)
+#         ocr = ocr_collection.insert_one({
+#             "user_id": user_id,
+#             "project_id": project_id,
+#             "result_key": result_key,
+#             "package_key": image_key,
+#             "pdf_text": cleaned,
+#             "status": "Success",
+#             "created_at": datetime.utcnow()
+#         })
+#         ocr_id = str(ocr.inserted_id)
+    
+#         # Step 9: Update project collection with totals
+#         projects_collection.update_one(
+#             {"_id": ObjectId(project_id)},
+#             {
+#                 "$set": {
+#                     "status": "Success",
+#                     "result_key": result_key,
+#                     "result_url": result_url
+#                 }
+#             }
+#         )
+
+#         # Remove temp file
+#         os.remove(pdf_path)
+
+#         return {
+#             "ocr_id":ocr_id,
+#             "project_id": project_id,
+#             "user_id": user_id,
+#             "package_url": package_url,
+#             "result_url": result_url,
+#             "ocr_text": cleaned_text,
+#         }
+
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 @router.post("/ocr")
 async def extract_text_from_s3(
     user_id: str = Form(...),
     project_id: str = Form(...)
 ):
     try:
-        # Step 1: Find the first image in the Package folder
+        # Step 1: List all objects in Package folder
         package_prefix = f"{user_id}/{project_id}/Images/Package/"
         response = s3.list_objects_v2(Bucket=bucket_name, Prefix=package_prefix)
 
         if 'Contents' not in response or len(response['Contents']) == 0:
-            raise HTTPException(status_code=404, detail="No image found in Package folder")
+            raise HTTPException(status_code=404, detail="No images found in Package folder")
 
-        image_key = None
+        ocr_results = []
         for obj in response['Contents']:
-            if not obj['Key'].endswith("/"):
-                image_key = obj['Key']
-                break
+            image_key = obj['Key']
+            if image_key.endswith("/"):  # skip folders
+                continue
 
-        if not image_key:
-            raise HTTPException(status_code=404, detail="No valid image file found")
+            # Step 2: Download image from S3
+            img_stream = io.BytesIO()
+            s3.download_fileobj(bucket_name, image_key, img_stream)
+            img_stream.seek(0)
 
-        # Step 2: Download image from S3
-        img_stream = io.BytesIO()
-        s3.download_fileobj(bucket_name, image_key, img_stream)
-        img_stream.seek(0)
+            # Step 3: OCR
+            extracted_text = OCR(img_stream.getvalue())
+            cleaned_text = clean_ocr_text(extracted_text)
 
-        # Step 3: OCR
-        extracted_text = OCR(img_stream.getvalue())
-        cleaned_text = clean_ocr_text(extracted_text)
+            # Step 4: LLM invoice
+            llm_raw = send_to_llm(cleaned_text)
+            cleaned = clean_json_string(llm_raw)
+            invoice_data = json.loads(cleaned)
 
-        # Step 4: LLM invoice
-        llm_raw = send_to_llm(cleaned_text)
-        # llm_html = clean_llm_html(llm_raw)
-        cleaned = clean_json_string(llm_raw)
-        invoice_data = json.loads(cleaned)
-        # Step 5: Save PDF locally
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pdf_filename = f"invoice_{timestamp}.pdf"
-        pdf_path = os.path.join("invoices", pdf_filename)
-        os.makedirs("invoices", exist_ok=True)
-        generate_invoice_from_json(invoice_data,pdf_path)
-        # html_to_pdf(llm_html, pdf_path)
-        # Step 6: Upload PDF to S3 in Result folder
-        result_key = f"{user_id}/{project_id}/Images/Result/{pdf_filename}"
-        s3.upload_file(
-            Filename=pdf_path,
-            Bucket=bucket_name,
-            Key=result_key,
-            ExtraArgs={
-                "ContentType": "application/pdf",
-                "ContentDisposition": "inline"
+            # Step 5: Save PDF locally
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pdf_filename = f"invoice_{timestamp}.pdf"
+            pdf_path = os.path.join("invoices", pdf_filename)
+            os.makedirs("invoices", exist_ok=True)
+            generate_invoice_from_json(invoice_data, pdf_path)
+
+            # Step 6: Upload PDF to S3 in Result folder
+            result_key = f"{user_id}/{project_id}/Images/Result/{pdf_filename}"
+            s3.upload_file(
+                Filename=pdf_path,
+                Bucket=bucket_name,
+                Key=result_key,
+                ExtraArgs={
+                    "ContentType": "application/pdf",
+                    "ContentDisposition": "inline"
+                }
+            )
+
+            result_url = s3.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': bucket_name,
+                    'Key': result_key,
+                    'ResponseContentType': 'application/pdf'
+                },
+                ExpiresIn=86400
+            )
+
+            # Step 7: Save report in MongoDB
+            report_doc = {
+                "user_id": user_id,
+                "project_id": project_id,
+                "created_at": datetime.utcnow(),
+                **invoice_data
             }
-        )
+            report_collection.insert_one(report_doc)
 
+            # Step 8: Save OCR log in MongoDB
+            ocr = ocr_collection.insert_one({
+                "user_id": user_id,
+                "project_id": project_id,
+                "result_key": result_key,
+                "package_key": image_key,
+                "pdf_text": cleaned,
+                "status": "Success",
+                "created_at": datetime.utcnow()
+            })
 
-        package_url = s3.generate_presigned_url(
-                            'get_object',
-                            Params={
-                                'Bucket': bucket_name,
-                                'Key': image_key,
-                                'ResponseContentType': 'image/jpeg'
-                            },
-                            ExpiresIn=86400
-                        )
+            # Clean up temp PDF
+            os.remove(pdf_path)
 
-        result_url = s3.generate_presigned_url(
-            'get_object',
-            Params={
-                                'Bucket': bucket_name,
-                                'Key': result_key,
-                                'ResponseContentType': 'application/pdf'
-                            },
-            ExpiresIn=86400
-        )
-        report_doc = {
-        "user_id": user_id,
-        "project_id": project_id,
-        "created_at": datetime.utcnow(),
-        **invoice_data  # Merge all invoice fields
-    }
-        report_collection.insert_one(report_doc)
-        # Step 8: Save to MongoDB (OCR collection)
-        ocr = ocr_collection.insert_one({
-            "user_id": user_id,
-            "project_id": project_id,
-            "result_key": result_key,
-            "package_key": image_key,
-            "pdf_text": cleaned,
-            "status": "Success",
-            "created_at": datetime.utcnow()
-        })
-        ocr_id = str(ocr.inserted_id)
-    
-        # Step 9: Update project collection with totals
+            ocr_results.append({
+                "ocr_id": str(ocr.inserted_id),
+                "image_key": image_key,
+                "result_key": result_key,
+                "result_url": result_url,
+                "ocr_text": cleaned_text
+            })
+
+        # Step 9: Update project status
         projects_collection.update_one(
             {"_id": ObjectId(project_id)},
             {
                 "$set": {
                     "status": "Success",
-                    "result_key": result_key,
-                    "result_url": result_url
+                    "last_processed_at": datetime.utcnow(),
+                    "total_processed": len(ocr_results)
                 }
             }
         )
 
-        # Remove temp file
-        os.remove(pdf_path)
-
         return {
-            "ocr_id":ocr_id,
+            "message": "OCR completed for all images",
             "project_id": project_id,
             "user_id": user_id,
-            "package_url": package_url,
-            "result_url": result_url,
-            "ocr_text": cleaned_text,
+            "results": ocr_results
         }
 
     except Exception as e:
