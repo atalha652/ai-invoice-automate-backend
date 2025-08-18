@@ -536,21 +536,21 @@ async def extract_text_from_s3(
     user_id: str = Form(...),
     project_id: str = Form(...)
 ):
-    # 1️⃣ Get latest OCR document
-    ocr_doc = ocr_collection.find_one(
-        {"user_id": user_id, "project_id": project_id},
-        sort=[("created_at", -1)]
-    )
+    # 1️⃣ Get all OCR documents for this project
+    ocr_docs = list(ocr_collection.find(
+        {"user_id": user_id, "project_id": project_id}
+    ))
 
-    if not ocr_doc:
+    if not ocr_docs:
         raise HTTPException(status_code=404, detail="No OCR data found for this project.")
 
-    pdf_text = ocr_doc.get("pdf_text")
-    if not pdf_text:
-        raise HTTPException(status_code=404, detail="No PDF text found in OCR data.")
-
+    results = []
+    for ocr_doc in ocr_docs:
+        pdf_text = ocr_doc.get("pdf_text")
+        if not pdf_text:
+            continue 
     # 2️⃣ Create XML using LLM
-    prompt = f"""
+        prompt = f"""
 You are an expert in structured invoice data extraction and XML formatting.
 
 Your task:
@@ -706,20 +706,28 @@ Input Invoice Text:
 """
 
 
-    response = clients.responses.create(
-        model="gpt-4.1",
-        input=prompt
-    )
+        response = clients.responses.create(
+            model="gpt-4.1",
+            input=prompt
+        )
 
-    xml_output = response.output_text if hasattr(response, "output_text") else str(response)
-    invoice_collection.insert_one({
+        xml_output = response.output_text if hasattr(response, "output_text") else str(response)
+        invoice_doc = {
             "user_id": user_id,
             "project_id": project_id,
-            "invoice":xml_output,
+            "ocr_id": str(ocr_doc.get("_id")),
+            "invoice": xml_output,
             "created_at": datetime.utcnow()
+        }
+        invoice_collection.insert_one(invoice_doc)
+        results.append({
+            "ocr_id": str(ocr_doc.get("_id")),
+            "xml_preview": xml_output
         })
+
     return {
-        "message": "XML file created & uploaded successfully",
-        # "s3_url": xml_url,
-        "xml_preview": xml_output # preview for debugging
+        "message": f"XML files created for {len(results)} OCR documents",
+        "project_id": project_id,
+        "user_id": user_id,
+        "results": results
     }
