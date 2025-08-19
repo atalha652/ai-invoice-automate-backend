@@ -11,7 +11,10 @@ import certifi
 from jose import JWTError, jwt
 from dotenv import load_dotenv
 from fastapi.security import OAuth2PasswordBearer
-
+from typing import List, Optional
+from pydantic import BaseModel, EmailStr
+from enum import Enum
+from fastapi import Form, File, UploadFile
 # -------------------- Load Environment Variables --------------------
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
@@ -50,14 +53,53 @@ class OrganizationInfo(BaseModel):
     address: Optional[str] = None
     phone: Optional[str] = None
 
+class BankDetails(BaseModel):
+    iban: str
+    account_holder: str
+class PaymentMethod(str, Enum):
+    stripe = "Stripe"
+    redsys = "Redsys"
+    bizum = "Bizum"
+class Role(str, Enum):
+    user = "user"
+    admin = "admin"
+class OtherCertificate(BaseModel):
+    name: str
+    url_: str
 class UserCreate(BaseModel):
     name: str
     email: EmailStr
     phone: Optional[str] = None
     password: str
-    type: UserType
-    tax_id: Optional[str] = None  # Tax ID / VAT Number for all users
+    type: UserType                      # existing: individual / organization
+    tax_id: Optional[str] = None
     organization_info: Optional[OrganizationInfo] = None
+    
+    # New field
+    registration_flow: Optional[str] = None  # "personal_flow" / "company_flow"
+    
+    # Digital certificate fields
+    has_digital_certificate: Optional[str] = None  # yes_flow / no_flow
+    auto_fill: Optional[bool] = False
+    dni_nie: Optional[str] = None
+    bank_details: Optional[BankDetails] = None
+    # Payment
+    payment_method: Optional[PaymentMethod] = None
+    role: Optional[Role] = None
+
+    # FNMT & AEAT
+    connect_to_fnmt: Optional[bool] = False   # Generate request code
+    connect_to_aeat: Optional[bool] = False   # Request appointment (online/in-person)
+
+     # Administration
+    administrator_check: Optional[bool] = False
+    type_of_administration: Optional[str] = None
+
+    # Other certificates
+    other_certificate: Optional[List[OtherCertificate]] = []
+
+    #company 
+    status: Optional[bool] = False  # Default to False
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -90,27 +132,121 @@ def get_org_types():
     return [{"id": str(t["_id"]), "name": t["name"]} for t in types]
 
 # -------------------- Signup --------------------
-@router.post("/signup")
-def signup(user: UserCreate):
-    # Check if email already exists
-    if users_collection.find_one({"email": user.email.lower()}):
-        raise HTTPException(status_code=400, detail="Email already registered")
+@router.post(
+    "/signup",
+    summary="Register a new user",
+    description="""
+This endpoint registers a new user in the system.  
+It supports both **individual** and **organization** flows.  
+
+### Features:
+- Registration flow (personal/company)
+- Optional Digital Certificate upload
+- FNMT & AEAT integration flags
+- Administration checks
+- Additional certificates (JSON list)
+- Payment method selection
+
+### Notes:
+- `certificate` must be uploaded as `multipart/form-data` file.
+- `other_certificate` must be sent as a **JSON string** inside form-data,  
+  e.g. `[{"name":"Cert A","url_":"https://example.com/a"}]`.
+
+"""
+)
+async def signup(
+    # Basic info
+    name: str = Form(..., description="Full name of the user"),
+    email: EmailStr = Form(..., description="Email address (must be unique)"),
+    password: str = Form(..., description="Password (will be hashed)"),
+    type: UserType = Form(..., description="User type: 'individual' or 'organization'"),
+    phone: Optional[str] = Form(None, description="Phone number"),
+    tax_id: Optional[str] = Form(None, description="Tax identification number (NIF/CIF)"),
+
+    # Registration flow
+    registration_flow: Optional[str] = Form(None, description="Registration flow: 'personal_flow' or 'company_flow'"),
+    role: Optional[Role] = Form(None, description="User role: 'user' or 'admin'"),
+    # Digital certificate
+    has_digital_certificate: Optional[str] = Form(None, description="'yes_flow' or 'no_flow'"),
+    auto_fill: Optional[bool] = Form(False, description="Auto-fill data if certificate available"),
+    dni_nie: Optional[str] = Form(None, description="National ID (DNI/NIE)"),
+    iban: Optional[str] = Form(None, description="IBAN (bank account)"),
+    account_holder: Optional[str] = Form(None, description="Bank account holder name"),
+    certificate: UploadFile = File(None, description="Digital certificate file (.p12/.pfx/.pdf)"),
+
+    # FNMT & AEAT
+    connect_to_fnmt: Optional[bool] = Form(False, description="Generate FNMT request code"),
+    connect_to_aeat: Optional[bool] = Form(False, description="Request AEAT appointment (online/in-person)"),
+    status: Optional[bool] = Form(False, description="Status of the organization (default: False)"),
+    # Administration
+    administrator_check: Optional[bool] = Form(False, description="Admin validation required?"),
+    type_of_administration: Optional[str] = Form(None, description="Type of administration (e.g. central, regional)"),
+
+    # Other certificates
+    other_certificate: Optional[str] = Form(
+        None,
+        description="JSON list of certificates. Example: "
+                    "[{\"name\":\"Cert A\",\"url_\":\"https://example.com/a\"}]"
+    ),
+
+    # Payment
+    payment_method: Optional[PaymentMethod] = Form(None, description="Payment method: Stripe / Redsys / Bizum")
+):
+    import os, json, uuid
 
     # Hash password
-    hashed_pw = bcrypt.hashpw(user.password.encode(), bcrypt.gensalt()).decode()
+    hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-    # Prepare new user document
-    new_user = {
-        "name": user.name,
-        "email": user.email.lower(),
+    # Save uploaded certificate with unique filename
+    cert_path = None
+    if certificate:
+        os.makedirs("certs", exist_ok=True)
+        unique_filename = f"{uuid.uuid4()}_{certificate.filename}"
+        cert_path = os.path.join("certs", unique_filename)
+        with open(cert_path, "wb") as f:
+            f.write(await certificate.read())
+
+    # Parse other_certificate JSON
+    other_certs = []
+    if other_certificate:
+        try:
+            other_certs = json.loads(other_certificate)
+        except Exception:
+            other_certs = []
+
+    # Build user object
+    user = UserCreate(
+        name=name,
+        email=email,
+        phone=phone,
+        password=password,
+        type=type,
+        tax_id=tax_id,
+        organization_info=None,
+        registration_flow=registration_flow,
+        has_digital_certificate=has_digital_certificate,
+        auto_fill=auto_fill,
+        dni_nie=dni_nie,
+        bank_details=BankDetails(iban=iban, account_holder=account_holder) if iban and account_holder else None,
+        payment_method=payment_method,
+        connect_to_fnmt=connect_to_fnmt,
+        connect_to_aeat=connect_to_aeat,
+        administrator_check=administrator_check,
+        status=status,
+        role=role,
+        type_of_administration=type_of_administration,
+        other_certificate=[OtherCertificate(**oc) for oc in other_certs] if other_certs else []
+    )
+
+    # Prepare DB document
+    new_user = user.dict()
+    new_user.update({
         "password_hash": hashed_pw,
-        "phone": user.phone,
-        "type": user.type,
+        "certificate_path": cert_path if has_digital_certificate == "yes_flow" else None,
         "created_at": datetime.utcnow(),
-        "tax_id": user.tax_id  # Add tax_id for all users
-    }
+    })
 
-    # If organization, handle org type logic
+    # Organization handling
     if user.type == UserType.organization and user.organization_info:
         org_type = None
 
