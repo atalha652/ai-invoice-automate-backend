@@ -15,6 +15,7 @@ from typing import List, Optional
 from pydantic import BaseModel, EmailStr
 from enum import Enum
 from fastapi import Form, File, UploadFile
+import os, json, uuid
 # -------------------- Load Environment Variables --------------------
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
@@ -177,12 +178,19 @@ async def signup(
     ),
 
     # Payment
-    payment_method: Optional[PaymentMethod] = Form(None, description="Payment method: Stripe / Redsys / Bizum")
+    payment_method: Optional[str] = Form(None, description="Payment method: Stripe / Redsys / Bizum")
 ):
-    import os, json, uuid
-    # In your signup endpoint, add this before building the UserCreate object:
+    # Convert empty string to None
     if payment_method == "":
         payment_method = None
+    
+    # Convert string to enum if provided
+    payment_method_enum = None
+    if payment_method:
+        try:
+            payment_method_enum = PaymentMethod(payment_method)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid payment method")
 
     # Hash password
     hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -219,7 +227,7 @@ async def signup(
         auto_fill=auto_fill,
         dni_nie=dni_nie,
         bank_details=BankDetails(iban=iban, account_holder=account_holder) if iban and account_holder else None,
-        payment_method=payment_method_enum,  # Use the converted enum
+        payment_method=payment_method,  # Use the converted enum
         connect_to_fnmt=connect_to_fnmt,
         connect_to_aeat=connect_to_aeat,
         administrator_check=administrator_check,
