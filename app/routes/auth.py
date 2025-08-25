@@ -181,19 +181,9 @@ async def signup(
 ):
     import os, json, uuid
     # In your signup endpoint, add this before building the UserCreate object:
-    if payment_method:
-        # Convert to proper case to match enum
-        payment_method_lower = payment_method.lower()
-        if payment_method_lower == "stripe":
-            payment_method_enum = PaymentMethod.stripe
-        elif payment_method_lower == "redsys":
-            payment_method_enum = PaymentMethod.redsys
-        elif payment_method_lower == "bizum":
-            payment_method_enum = PaymentMethod.bizum
-        else:
-            payment_method_enum = None
-    else:
-        payment_method_enum = None
+    if payment_method == "":
+        payment_method = None
+
     # Hash password
     hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
