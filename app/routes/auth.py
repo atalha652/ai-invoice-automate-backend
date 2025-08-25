@@ -71,36 +71,23 @@ class UserCreate(BaseModel):
     email: EmailStr
     phone: Optional[str] = None
     password: str
-    type: UserType                      # existing: individual / organization
+    type: UserType
     tax_id: Optional[str] = None
     organization_info: Optional[OrganizationInfo] = None
-    
-    # New field
-    registration_flow: Optional[str] = None  # "personal_flow" / "company_flow"
-    
-    # Digital certificate fields
-    has_digital_certificate: Optional[str] = None  # yes_flow / no_flow
+    registration_flow: Optional[str] = None
+    has_digital_certificate: Optional[str] = None
     auto_fill: Optional[bool] = False
     dni_nie: Optional[str] = None
     bank_details: Optional[BankDetails] = None
-    # Payment
-    payment_method: Optional[PaymentMethod] = None
+    # Change this line to properly handle None:
+    payment_method: Optional[PaymentMethod] = None  # This should work now
     role: Optional[Role] = None
-
-    # FNMT & AEAT
-    connect_to_fnmt: Optional[bool] = False   # Generate request code
-    connect_to_aeat: Optional[bool] = False   # Request appointment (online/in-person)
-
-     # Administration
+    connect_to_fnmt: Optional[bool] = False
+    connect_to_aeat: Optional[bool] = False
     administrator_check: Optional[bool] = False
     type_of_administration: Optional[str] = None
-
-    # Other certificates
     other_certificate: Optional[List[OtherCertificate]] = []
-
-    #company 
-    status: Optional[bool] = False  # Default to False
-
+    status: Optional[bool] = False
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
@@ -193,7 +180,20 @@ async def signup(
     payment_method: Optional[PaymentMethod] = Form(None, description="Payment method: Stripe / Redsys / Bizum")
 ):
     import os, json, uuid
-
+    # In your signup endpoint, add this before building the UserCreate object:
+    if payment_method:
+        # Convert to proper case to match enum
+        payment_method_lower = payment_method.lower()
+        if payment_method_lower == "stripe":
+            payment_method_enum = PaymentMethod.stripe
+        elif payment_method_lower == "redsys":
+            payment_method_enum = PaymentMethod.redsys
+        elif payment_method_lower == "bizum":
+            payment_method_enum = PaymentMethod.bizum
+        else:
+            payment_method_enum = None
+    else:
+        payment_method_enum = None
     # Hash password
     hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
@@ -215,6 +215,7 @@ async def signup(
             other_certs = []
 
     # Build user object
+# Build user object
     user = UserCreate(
         name=name,
         email=email,
@@ -228,7 +229,7 @@ async def signup(
         auto_fill=auto_fill,
         dni_nie=dni_nie,
         bank_details=BankDetails(iban=iban, account_holder=account_holder) if iban and account_holder else None,
-        payment_method=payment_method,
+        payment_method=payment_method_enum,  # Use the converted enum
         connect_to_fnmt=connect_to_fnmt,
         connect_to_aeat=connect_to_aeat,
         administrator_check=administrator_check,
