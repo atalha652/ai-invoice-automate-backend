@@ -421,41 +421,61 @@ async def extract_text_from_s3(
     project_id: str = Form(...)
 ):
     try:
-        # Step 1: List all objects in Package folder
+        # ✅ Step 1: Mark project as Processing
+        projects_collection.update_one(
+            {"_id": ObjectId(project_id)},
+            {"$set": {
+                "status": "Processing",
+                "last_processed_at": datetime.utcnow(),
+                "processed_count": 0
+            }}
+        )
+
+        # Step 2: List all objects in Package folder
         package_prefix = f"{user_id}/{project_id}/Images/Package/"
         response = s3.list_objects_v2(Bucket=bucket_name, Prefix=package_prefix)
 
         if 'Contents' not in response or len(response['Contents']) == 0:
             raise HTTPException(status_code=404, detail="No images found in Package folder")
 
+        total_images = len([obj for obj in response['Contents'] if not obj['Key'].endswith("/")])
+
+        # Save total images in project (for progress tracking)
+        projects_collection.update_one(
+            {"_id": ObjectId(project_id)},
+            {"$set": {"total_images": total_images}}
+        )
+
         ocr_results = []
+        processed_count = 0
+
         for obj in response['Contents']:
             image_key = obj['Key']
             if image_key.endswith("/"):  # skip folders
                 continue
 
-            # Step 2: Download image from S3
+            # Step 3: Download image from S3
             img_stream = io.BytesIO()
             s3.download_fileobj(bucket_name, image_key, img_stream)
             img_stream.seek(0)
 
-            # Step 3: OCR
+            # Step 4: OCR
             extracted_text = OCR(img_stream.getvalue())
             cleaned_text = clean_ocr_text(extracted_text)
 
-            # Step 4: LLM invoice
+            # Step 5: LLM invoice
             llm_raw = send_to_llm(cleaned_text)
             cleaned = clean_json_string(llm_raw)
             invoice_data = json.loads(cleaned)
 
-            # Step 5: Save PDF locally
+            # Step 6: Save PDF locally
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             pdf_filename = f"invoice_{timestamp}.pdf"
             pdf_path = os.path.join("invoices", pdf_filename)
             os.makedirs("invoices", exist_ok=True)
             generate_invoice_from_json(invoice_data, pdf_path)
 
-            # Step 6: Upload PDF to S3 in Result folder
+            # Step 7: Upload PDF to S3 in Result folder
             result_key = f"{user_id}/{project_id}/Images/Result/{pdf_filename}"
             s3.upload_file(
                 Filename=pdf_path,
@@ -477,7 +497,7 @@ async def extract_text_from_s3(
                 ExpiresIn=86400
             )
 
-            # Step 7: Save report in MongoDB
+            # Step 8: Save report in MongoDB
             report_doc = {
                 "user_id": user_id,
                 "project_id": project_id,
@@ -486,7 +506,7 @@ async def extract_text_from_s3(
             }
             report_collection.insert_one(report_doc)
 
-            # Step 8: Save OCR log in MongoDB
+            # Step 9: Save OCR log in MongoDB
             ocr = ocr_collection.insert_one({
                 "user_id": user_id,
                 "project_id": project_id,
@@ -500,6 +520,13 @@ async def extract_text_from_s3(
             # Clean up temp PDF
             os.remove(pdf_path)
 
+            # Step 10: Update progress
+            processed_count += 1
+            projects_collection.update_one(
+                {"_id": ObjectId(project_id)},
+                {"$set": {"processed_count": processed_count}}
+            )
+
             ocr_results.append({
                 "ocr_id": str(ocr.inserted_id),
                 "image_key": image_key,
@@ -508,16 +535,14 @@ async def extract_text_from_s3(
                 "ocr_text": cleaned_text
             })
 
-        # Step 9: Update project status
+        # ✅ Step 11: Mark project as Done
         projects_collection.update_one(
             {"_id": ObjectId(project_id)},
-            {
-                "$set": {
-                    "status": "Success",
-                    "last_processed_at": datetime.utcnow(),
-                    "total_processed": len(ocr_results)
-                }
-            }
+            {"$set": {
+                "status": "Done",
+                "last_processed_at": datetime.utcnow(),
+                "total_processed": len(ocr_results)
+            }}
         )
 
         return {
@@ -528,6 +553,15 @@ async def extract_text_from_s3(
         }
 
     except Exception as e:
+        # ❌ Step 12: Mark project as Failed
+        projects_collection.update_one(
+            {"_id": ObjectId(project_id)},
+            {"$set": {
+                "status": "Failed",
+                "error_message": str(e),
+                "last_processed_at": datetime.utcnow()
+            }}
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
