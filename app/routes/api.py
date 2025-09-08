@@ -425,7 +425,7 @@ async def extract_text_from_s3(
         projects_collection.update_one(
             {"_id": ObjectId(project_id)},
             {"$set": {
-                "status": "Processing",
+                "status": "Inprogress",
                 "last_processed_at": datetime.utcnow(),
                 "processed_count": 0
             }}
