@@ -3,6 +3,7 @@ from fastapi import APIRouter, File, UploadFile, HTTPException
 from PIL import Image
 import pytesseract
 import io
+import re
 import tempfile
 from google import genai
 from google.genai import types
@@ -13,7 +14,6 @@ from openai import OpenAI
 import bcrypt
 from datetime import datetime, timedelta
 import certifi
-import bcrypt
 from app.routes.auth import get_current_user
 from fastapi import FastAPI, HTTPException
 from pymongo import MongoClient
@@ -21,30 +21,28 @@ from fastapi.security import OAuth2PasswordBearer
 import certifi
 from dotenv import load_dotenv
 from pydantic import BaseModel, EmailStr
-import bcrypt
 from fastapi import APIRouter, File, UploadFile, Depends, Form, HTTPException
 from bson import ObjectId
 from fastapi import APIRouter, File, Form, Depends, HTTPException, UploadFile
-from bson import ObjectId
 import boto3
-from fastapi import APIRouter, File, UploadFile, HTTPException
 import json
 from PIL import Image
 import io
 import os
 from openai import OpenAI
 from fastapi import Form
-from PIL import Image
-from openai import OpenAI
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
-import json
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import (
     SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, 
     PageBreak
 )
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+from email.mime.text import MIMEText
 
 load_dotenv()
 # Set Tesseract path (Windows)
@@ -70,6 +68,7 @@ projects_collection = db["projects"]
 ocr_collection = db["ocr"]  # Replace 'db' with your actual DB object
 report_collection = db["report"]
 invoice_collection = db["e-invoice"]
+users_collection = db["users"]
 
 
 router = APIRouter()
@@ -285,7 +284,7 @@ def clean_json_string(json_text: str) -> str:
 def OCR(image_bytes: bytes) -> str:
     client = genai.Client(api_key=os.getenv("GENAI_API_KEY"))
     response = client.models.generate_content(
-        model='gemini-1.5-flash',
+        model='gemini-2.0-flash-lite',
         contents=[
             types.Part.from_bytes(
                 data=image_bytes,
@@ -295,126 +294,71 @@ def OCR(image_bytes: bytes) -> str:
         ]
     )
     return response.text
-# @router.post("/ocr")
-# async def extract_text_from_s3(
-#     user_id: str = Form(...),
-#     project_id: str = Form(...)
-# ):
-#     try:
-#         # Step 1: Find the first image in the Package folder
-#         package_prefix = f"{user_id}/{project_id}/Images/Package/"
-#         response = s3.list_objects_v2(Bucket=bucket_name, Prefix=package_prefix)
 
-#         if 'Contents' not in response or len(response['Contents']) == 0:
-#             raise HTTPException(status_code=404, detail="No image found in Package folder")
+def classify_invoice_with_llm(cleaned_text: str) -> dict:
+    """
+    Calls LLM to classify invoice into:
+    - classify: income | expense
+    - label: product | service
+    - details: merchant, date, amount, tax_rate
+    """
+    prompt = f"""
+    You are an AI assistant. Classify the following OCR invoice text into a structured JSON.
 
-#         image_key = None
-#         for obj in response['Contents']:
-#             if not obj['Key'].endswith("/"):
-#                 image_key = obj['Key']
-#                 break
+    The JSON format must be:
+    {{
+      "classification": {{
+        "classify": "income" | "expense",
+        "label": "product" | "service",
+        "details": {{
+          "merchant": "<merchant_name>",
+          "date": "<YYYY-MM-DD>",
+          "amount": <number>,
+          "tax_rate": <number>
+        }}
+      }}
+    }}
 
-#         if not image_key:
-#             raise HTTPException(status_code=404, detail="No valid image file found")
+    Text:
+    {cleaned_text}
+    """
 
-#         # Step 2: Download image from S3
-#         img_stream = io.BytesIO()
-#         s3.download_fileobj(bucket_name, image_key, img_stream)
-#         img_stream.seek(0)
+    response = clients.chat.completions.create(
+        model="gpt-4.1",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
 
-#         # Step 3: OCR
-#         extracted_text = OCR(img_stream.getvalue())
-#         cleaned_text = clean_ocr_text(extracted_text)
+    raw_output = response.choices[0].message.content.strip()
+    cleaned_output = clean_json_string(raw_output)
+    return json.loads(cleaned_output)
 
-#         # Step 4: LLM invoice
-#         llm_raw = send_to_llm(cleaned_text)
-#         # llm_html = clean_llm_html(llm_raw)
-#         cleaned = clean_json_string(llm_raw)
-#         invoice_data = json.loads(cleaned)
-#         # Step 5: Save PDF locally
-#         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-#         pdf_filename = f"invoice_{timestamp}.pdf"
-#         pdf_path = os.path.join("invoices", pdf_filename)
-#         os.makedirs("invoices", exist_ok=True)
-#         generate_invoice_from_json(invoice_data,pdf_path)
-#         # html_to_pdf(llm_html, pdf_path)
-#         # Step 6: Upload PDF to S3 in Result folder
-#         result_key = f"{user_id}/{project_id}/Images/Result/{pdf_filename}"
-#         s3.upload_file(
-#             Filename=pdf_path,
-#             Bucket=bucket_name,
-#             Key=result_key,
-#             ExtraArgs={
-#                 "ContentType": "application/pdf",
-#                 "ContentDisposition": "inline"
-#             }
-#         )
+def send_invoice_email(to_email: str, file_paths: list, file_type: str):
+    from_email = "zainisrar2003@gmail.com"
+    password = "yqjq bvjq cnmx glcm"
+
+    msg = MIMEMultipart()
+    msg["From"] = from_email
+    msg["To"] = to_email
+    msg["Subject"] = f"Your Invoices ({file_type.upper()})"
+    msg.attach(MIMEText(f"Hello,\n\nPlease find your {file_type.upper()} invoices attached.\n\nBest regards", "plain"))
+
+    if not isinstance(file_paths, list):
+        file_paths = [file_paths]
+
+    # Attach all files
+    for file_path in file_paths:
+        with open(file_path, "rb") as f:
+            attach = MIMEApplication(f.read(), _subtype=file_type)
+            attach.add_header("Content-Disposition", "attachment", filename=file_path.split("/")[-1])
+            msg.attach(attach)
+
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.starttls()
+        server.login(from_email, password)
+        server.send_message(msg)
 
 
-#         # package_url = s3.generate_presigned_url(
-#         #                     'get_object',
-#         #                     Params={
-#         #                         'Bucket': bucket_name,
-#         #                         'Key': image_key,
-#         #                         'ResponseContentType': 'image/jpeg'
-#         #                     },
-#         #                     ExpiresIn=86400
-#         #                 )
-
-#         result_url = s3.generate_presigned_url(
-#             'get_object',
-#             Params={
-#                                 'Bucket': bucket_name,
-#                                 'Key': result_key,
-#                                 'ResponseContentType': 'application/pdf'
-#                             },
-#             ExpiresIn=86400
-#         )
-#         report_doc = {
-#         "user_id": user_id,
-#         "project_id": project_id,
-#         "created_at": datetime.utcnow(),
-#         **invoice_data  # Merge all invoice fields
-#     }
-#         report_collection.insert_one(report_doc)
-#         # Step 8: Save to MongoDB (OCR collection)
-#         ocr = ocr_collection.insert_one({
-#             "user_id": user_id,
-#             "project_id": project_id,
-#             "result_key": result_key,
-#             "package_key": image_key,
-#             "pdf_text": cleaned,
-#             "status": "Success",
-#             "created_at": datetime.utcnow()
-#         })
-#         ocr_id = str(ocr.inserted_id)
-    
-#         # Step 9: Update project collection with totals
-#         projects_collection.update_one(
-#             {"_id": ObjectId(project_id)},
-#             {
-#                 "$set": {
-#                     "status": "Success",
-#                     "result_key": result_key,
-#                     "result_url": result_url
-#                 }
-#             }
-#         )
-
-#         # Remove temp file
-#         os.remove(pdf_path)
-
-#         return {
-#             "ocr_id":ocr_id,
-#             "project_id": project_id,
-#             "user_id": user_id,
-#             "package_url": package_url,
-#             "result_url": result_url,
-#             "ocr_text": cleaned_text,
-#         }
-
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
 @router.post("/ocr")
 async def extract_text_from_s3(
     user_id: str = Form(...),
@@ -446,8 +390,14 @@ async def extract_text_from_s3(
             {"$set": {"total_images": total_images}}
         )
 
+        user_doc = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user_doc or "email" not in user_doc:
+            raise HTTPException(status_code=400, detail="User email not found")
+        user_email = user_doc["email"]
+
         ocr_results = []
         processed_count = 0
+        pdf_files = []  # ✅ collect generated PDFs
 
         for obj in response['Contents']:
             image_key = obj['Key']
@@ -463,7 +413,10 @@ async def extract_text_from_s3(
             extracted_text = OCR(img_stream.getvalue())
             cleaned_text = clean_ocr_text(extracted_text)
 
-            # Step 5: LLM invoice
+            # Step 4.5: Classification
+            classify_json = classify_invoice_with_llm(cleaned_text)
+
+            # Step 5: LLM invoice extraction
             llm_raw = send_to_llm(cleaned_text)
             cleaned = clean_json_string(llm_raw)
             invoice_data = json.loads(cleaned)
@@ -474,6 +427,7 @@ async def extract_text_from_s3(
             pdf_path = os.path.join("invoices", pdf_filename)
             os.makedirs("invoices", exist_ok=True)
             generate_invoice_from_json(invoice_data, pdf_path)
+            pdf_files.append(pdf_path)  # ✅ collect file for email later
 
             # Step 7: Upload PDF to S3 in Result folder
             result_key = f"{user_id}/{project_id}/Images/Result/{pdf_filename}"
@@ -513,12 +467,10 @@ async def extract_text_from_s3(
                 "result_key": result_key,
                 "package_key": image_key,
                 "pdf_text": cleaned,
+                **classify_json,
                 "status": "Success",
                 "created_at": datetime.utcnow()
             })
-
-            # Clean up temp PDF
-            os.remove(pdf_path)
 
             # Step 10: Update progress
             processed_count += 1
@@ -534,6 +486,13 @@ async def extract_text_from_s3(
                 "result_url": result_url,
                 "ocr_text": cleaned_text
             })
+
+        # ✅ Send all invoices in one email after loop
+        if pdf_files:
+            send_invoice_email(user_email, pdf_files, "pdf")
+            # cleanup PDFs after sending email
+            for pdf_file in pdf_files:
+                os.remove(pdf_file)
 
         # ✅ Step 11: Mark project as Done
         projects_collection.update_one(
@@ -565,6 +524,58 @@ async def extract_text_from_s3(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+@router.get("/ocr/{project_id}")
+async def get_ocr_results(project_id: str, user_id: str):
+    try:
+        # ✅ Step 1: Fetch project details
+        project = projects_collection.find_one({"_id": ObjectId(project_id), "user_id": user_id})
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # ✅ Step 2: Fetch OCR logs for this project
+        ocr_logs = list(ocr_collection.find(
+            {"project_id": project_id, "user_id": user_id},
+            {"_id": 1, "result_key": 1, "package_key": 1, "pdf_text": 1, "status": 1, "created_at": 1}
+        ))
+
+        results = []
+        for log in ocr_logs:
+            results.append({
+                "ocr_id": str(log["_id"]),
+                "result_key": log.get("result_key"),
+                "package_key": log.get("package_key"),
+                "status": log.get("status"),
+                "created_at": log.get("created_at"),
+                "ocr_text": log.get("pdf_text")
+            })
+
+        return {
+            "project_id": project_id,
+            "user_id": user_id,
+            "status": project.get("status", "Unknown"),
+            "total_images": project.get("total_images", 0),
+            "processed_count": project.get("processed_count", 0),
+            "results": results
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+def clean_xml(response_text: str) -> str:
+    """
+    Extracts and returns only the XML part from a text response.
+    Looks for content starting with <?xml ... ?> and ending with </fe:Facturae>.
+    """
+    pattern = re.compile(r'(<\?xml.*?</fe:Facturae>)', re.DOTALL)
+    match = pattern.search(response_text)
+    if match:
+        return match.group(1).strip()
+    return ""  # return empty if no XML found
+
 @router.post("/xml")
 async def extract_text_from_s3(
     user_id: str = Form(...),
@@ -574,16 +585,24 @@ async def extract_text_from_s3(
     ocr_docs = list(ocr_collection.find(
         {"user_id": user_id, "project_id": project_id}
     ))
-
+    
     if not ocr_docs:
         raise HTTPException(status_code=404, detail="No OCR data found for this project.")
 
     results = []
+    xml_files = []  # ✅ collect XMLs for email
+
+    user_doc = users_collection.find_one({"_id": ObjectId(user_id)})
+    if not user_doc or "email" not in user_doc:
+        raise HTTPException(status_code=400, detail="User email not found")
+    user_email = user_doc["email"]
+
     for ocr_doc in ocr_docs:
         pdf_text = ocr_doc.get("pdf_text")
         if not pdf_text:
             continue 
-    # 2️⃣ Create XML using LLM
+
+        # 2️⃣ Create XML using LLM
         prompt = f"""
 You are an expert in structured invoice data extraction and XML formatting.
 
@@ -738,26 +757,48 @@ Example XML structure:
 Input Invoice Text:
 {pdf_text}
 """
-
-
         response = clients.responses.create(
             model="gpt-4.1",
             input=prompt
         )
 
         xml_output = response.output_text if hasattr(response, "output_text") else str(response)
+        xml_code = clean_xml(xml_output)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        xml_filename = f"invoice_{timestamp}.xml"
+        xml_path = os.path.join("xml_files", xml_filename)
+        os.makedirs("xml_files", exist_ok=True)
+
+        # Save cleaned XML file
+        with open(xml_path, "w", encoding="utf-8") as f:
+            f.write(xml_code)
+
+        # ✅ Append file path (not XML string)
+        xml_files.append(xml_path)
+
+        # Save in DB
         invoice_doc = {
             "user_id": user_id,
             "project_id": project_id,
             "ocr_id": str(ocr_doc.get("_id")),
-            "invoice": xml_output,
+            "invoice": xml_code,  # save cleaned XML, not raw
             "created_at": datetime.utcnow()
         }
         invoice_collection.insert_one(invoice_doc)
+
         results.append({
             "ocr_id": str(ocr_doc.get("_id")),
-            "xml_preview": xml_output
+            "xml_preview": xml_code[:500]  # preview cleaned XML
         })
+
+        # ✅ Send all XMLs in one email
+    if xml_files:
+        send_invoice_email(user_email, xml_files, "xml")
+
+        # cleanup after sending
+        for xml_file in xml_files:
+            os.remove(xml_file)
 
     return {
         "message": f"XML files created for {len(results)} OCR documents",
