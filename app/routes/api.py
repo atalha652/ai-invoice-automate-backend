@@ -466,6 +466,7 @@ async def extract_text_from_s3(
                 "project_id": project_id,
                 "result_key": result_key,
                 "package_key": image_key,
+                "result_url": result_url,
                 "pdf_text": cleaned,
                 **classify_json,
                 "status": "Success",
@@ -523,47 +524,38 @@ async def extract_text_from_s3(
         )
         raise HTTPException(status_code=500, detail=str(e))
 
+from fastapi import Query
 
 
 @router.get("/ocr/{project_id}")
-async def get_ocr_results(project_id: str, user_id: str):
+async def get_ocr_results(project_id: str, user_id: str = Query(...)):
     try:
         # ✅ Step 1: Fetch project details
-        project = projects_collection.find_one({"_id": ObjectId(project_id), "user_id": user_id})
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
+        project = projects_collection.find_one(
+            {"_id": ObjectId(project_id)} if ObjectId.is_valid(project_id) else {"_id": project_id},
+            {"files": 1}  # Only fetch files
+        )
 
-        # ✅ Step 2: Fetch OCR logs for this project
+        if not project:
+            raise HTTPException(status_code=404, detail=f"Project not found for project_id={project_id}")
+
+        # ✅ Step 2: Extract file URLs
+        file_urls = [f.get("file_url") for f in project.get("files", []) if "file_url" in f]
+
+        # ✅ Step 3: Fetch OCR logs for this project
         ocr_logs = list(ocr_collection.find(
             {"project_id": project_id, "user_id": user_id},
-            {"_id": 1, "result_key": 1, "package_key": 1, "pdf_text": 1, "status": 1, "created_at": 1}
+            {"result_url": 1, "_id": 0}
         ))
 
-        results = []
-        for log in ocr_logs:
-            results.append({
-                "ocr_id": str(log["_id"]),
-                "result_key": log.get("result_key"),
-                "package_key": log.get("package_key"),
-                "status": log.get("status"),
-                "created_at": log.get("created_at"),
-                "ocr_text": log.get("pdf_text")
-            })
-
+        # ✅ Return only result URLs and file URLs
         return {
-            "project_id": project_id,
-            "user_id": user_id,
-            "status": project.get("status", "Unknown"),
-            "total_images": project.get("total_images", 0),
-            "processed_count": project.get("processed_count", 0),
-            "results": results
+            "file_urls": file_urls,
+            "result_urls": [log.get("result_url") for log in ocr_logs if log.get("result_url")]
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-
 
 def clean_xml(response_text: str) -> str:
     """

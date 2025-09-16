@@ -142,6 +142,7 @@ It supports both **individual** and **organization** flows.
 
 """
 )
+
 async def signup(
     # Basic info
     name: str = Form(..., description="Full name of the user"),
@@ -154,6 +155,7 @@ async def signup(
     # Registration flow
     registration_flow: Optional[str] = Form(None, description="Registration flow: 'personal_flow' or 'company_flow'"),
     role: Optional[Role] = Form(None, description="User role: 'user' or 'admin'"),
+
     # Digital certificate
     has_digital_certificate: Optional[str] = Form(None, description="'yes_flow' or 'no_flow'"),
     auto_fill: Optional[bool] = Form(False, description="Auto-fill data if certificate available"),
@@ -166,6 +168,7 @@ async def signup(
     connect_to_fnmt: Optional[bool] = Form(False, description="Generate FNMT request code"),
     connect_to_aeat: Optional[bool] = Form(False, description="Request AEAT appointment (online/in-person)"),
     status: Optional[bool] = Form(False, description="Status of the organization (default: False)"),
+
     # Administration
     administrator_check: Optional[bool] = Form(False, description="Admin validation required?"),
     type_of_administration: Optional[str] = Form(None, description="Type of administration (e.g. central, regional)"),
@@ -183,7 +186,7 @@ async def signup(
     # Convert empty string to None
     if payment_method == "":
         payment_method = None
-    
+
     # Convert string to enum if provided
     payment_method_enum = None
     if payment_method:
@@ -195,16 +198,21 @@ async def signup(
     # Hash password
     hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-    # Save uploaded certificate with unique filename
+    # Save uploaded certificate with unique filename only if user selected yes_flow
     cert_path = None
-    if certificate:
+    if has_digital_certificate == "yes_flow" and certificate:
+        # ✅ Validate file extension
+        allowed_extensions = (".p12", ".pfx", ".pdf")
+        if not certificate.filename.lower().endswith(allowed_extensions):
+            raise HTTPException(status_code=400, detail="Invalid certificate format. Allowed: .p12, .pfx, .pdf")
+
         os.makedirs("certs", exist_ok=True)
         unique_filename = f"{uuid.uuid4()}_{certificate.filename}"
         cert_path = os.path.join("certs", unique_filename)
         with open(cert_path, "wb") as f:
             f.write(await certificate.read())
 
-    # Parse other_certificate JSON
+    # Parse other_certificate JSON safely
     other_certs = []
     if other_certificate:
         try:
@@ -213,7 +221,6 @@ async def signup(
             other_certs = []
 
     # Build user object
-# Build user object
     user = UserCreate(
         name=name,
         email=email,
@@ -227,7 +234,7 @@ async def signup(
         auto_fill=auto_fill,
         dni_nie=dni_nie,
         bank_details=BankDetails(iban=iban, account_holder=account_holder) if iban and account_holder else None,
-        payment_method=payment_method,  # Use the converted enum
+        payment_method=payment_method_enum,  # ✅ use enum, not raw string
         connect_to_fnmt=connect_to_fnmt,
         connect_to_aeat=connect_to_aeat,
         administrator_check=administrator_check,
@@ -289,6 +296,7 @@ async def signup(
     result = users_collection.insert_one(new_user)
     return {"message": "User created successfully", "user_id": str(result.inserted_id)}
 
+    
 # -------------------- Login --------------------
 @router.post("/login")
 def login(user: UserLogin):
