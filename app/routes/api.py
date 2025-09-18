@@ -586,6 +586,7 @@ def clean_xml(response_text: str) -> str:
         return match.group(1).strip()
     return ""  # return empty if no XML found
 
+
 @router.post("/xml")
 async def extract_text_from_s3(
     user_id: str = Form(...),
@@ -780,11 +781,32 @@ Input Invoice Text:
         xml_path = os.path.join("xml_files", xml_filename)
         os.makedirs("xml_files", exist_ok=True)
 
-        # Save cleaned XML file
+        # Save XML locally first
         with open(xml_path, "w", encoding="utf-8") as f:
             f.write(xml_code)
 
-        # ✅ Append file path (not XML string)
+        # ✅ Upload XML to S3
+        xml_key = f"{user_id}/{project_id}/xml/{xml_filename}"
+        s3.upload_file(
+            Filename=xml_path,
+            Bucket=bucket_name,
+            Key=xml_key,
+            ExtraArgs={
+                "ContentType": "application/xml",
+                "ContentDisposition": "inline"
+            }
+        )
+
+        xml_url = s3.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': bucket_name,
+                'Key': xml_key,
+                'ResponseContentType': 'application/xml'
+            },
+            ExpiresIn=86400
+        )
+
         xml_files.append(xml_path)
 
         # Save in DB
@@ -792,26 +814,27 @@ Input Invoice Text:
             "user_id": user_id,
             "project_id": project_id,
             "ocr_id": str(ocr_doc.get("_id")),
-            "invoice": xml_code,  # save cleaned XML, not raw
+            "invoice": xml_code,  # cleaned XML
+            "xml_url": xml_url,   # ✅ store S3 link
             "created_at": datetime.utcnow()
         }
         invoice_collection.insert_one(invoice_doc)
 
         results.append({
             "ocr_id": str(ocr_doc.get("_id")),
-            "xml_preview": xml_code[:500]  # preview cleaned XML
+            "xml_preview": xml_code[:500],
+            "xml_url": xml_url
         })
 
-        # ✅ Send all XMLs in one email
+    # ✅ Send email with attachments
     if xml_files:
         send_invoice_email(user_email, xml_files, "xml")
-
-        # cleanup after sending
+        # cleanup
         for xml_file in xml_files:
             os.remove(xml_file)
 
     return {
-        "message": f"XML files created for {len(results)} OCR documents",
+        "message": f"XML files created & uploaded for {len(results)} OCR documents",
         "project_id": project_id,
         "user_id": user_id,
         "results": results
