@@ -140,7 +140,7 @@ class AccountingService:
     
     async def get_voucher(self, voucher_id: str, organization_id: str) -> Optional[Voucher]:
         """Get voucher by ID."""
-        return await self.repo.get_voucher_by_id(voucher_id, organization_id)
+        return await self.repo.get_voucher_by_id(organization_id, voucher_id)
     
     async def get_vouchers(self, organization_id: str, journal_id: Optional[str] = None, 
                           status: Optional[VoucherStatus] = None,
@@ -151,7 +151,7 @@ class AccountingService:
     
     async def post_voucher(self, voucher_id: str, organization_id: str) -> Voucher:
         """Post a voucher (create ledger entries and update account balances)."""
-        voucher = await self.repo.get_voucher_by_id(voucher_id, organization_id)
+        voucher = await self.repo.get_voucher_by_id(organization_id, voucher_id)
         if not voucher:
             raise ValueError("Voucher not found")
         
