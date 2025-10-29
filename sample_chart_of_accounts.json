@@ -1,0 +1,202 @@
+[
+  {
+    "account_code": "1000",
+    "account_name": "Cash",
+    "account_type": "asset",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Cash on hand and in bank accounts"
+  },
+  {
+    "account_code": "1100",
+    "account_name": "Accounts Receivable",
+    "account_type": "asset",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Money owed by customers"
+  },
+  {
+    "account_code": "1200",
+    "account_name": "Inventory",
+    "account_type": "asset",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Goods held for sale"
+  },
+  {
+    "account_code": "1300",
+    "account_name": "Prepaid Expenses",
+    "account_type": "asset",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Expenses paid in advance"
+  },
+  {
+    "account_code": "1500",
+    "account_name": "Equipment",
+    "account_type": "asset",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Office and business equipment"
+  },
+  {
+    "account_code": "1600",
+    "account_name": "Accumulated Depreciation - Equipment",
+    "account_type": "asset",
+    "parent_account": "1500",
+    "is_active": true,
+    "description": "Accumulated depreciation on equipment"
+  },
+  {
+    "account_code": "2000",
+    "account_name": "Accounts Payable",
+    "account_type": "liability",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Money owed to suppliers"
+  },
+  {
+    "account_code": "2100",
+    "account_name": "Accrued Expenses",
+    "account_type": "liability",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Expenses incurred but not yet paid"
+  },
+  {
+    "account_code": "2200",
+    "account_name": "Short-term Loans",
+    "account_type": "liability",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Loans payable within one year"
+  },
+  {
+    "account_code": "2300",
+    "account_name": "Taxes Payable",
+    "account_type": "liability",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Taxes owed to government"
+  },
+  {
+    "account_code": "3000",
+    "account_name": "Owner's Equity",
+    "account_type": "equity",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Owner's investment in the business"
+  },
+  {
+    "account_code": "3100",
+    "account_name": "Retained Earnings",
+    "account_type": "equity",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Accumulated profits retained in business"
+  },
+  {
+    "account_code": "4000",
+    "account_name": "Sales Revenue",
+    "account_type": "revenue",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Revenue from sales of goods or services"
+  },
+  {
+    "account_code": "4100",
+    "account_name": "Service Revenue",
+    "account_type": "revenue",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Revenue from services provided"
+  },
+  {
+    "account_code": "4200",
+    "account_name": "Interest Income",
+    "account_type": "revenue",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Income from interest earned"
+  },
+  {
+    "account_code": "5000",
+    "account_name": "Cost of Goods Sold",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Direct costs of producing goods sold"
+  },
+  {
+    "account_code": "5100",
+    "account_name": "Office Supplies",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Office supplies and materials"
+  },
+  {
+    "account_code": "5200",
+    "account_name": "Rent Expense",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Office and facility rent"
+  },
+  {
+    "account_code": "5300",
+    "account_name": "Utilities Expense",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Electricity, water, gas, internet"
+  },
+  {
+    "account_code": "5400",
+    "account_name": "Salaries Expense",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Employee salaries and wages"
+  },
+  {
+    "account_code": "5500",
+    "account_name": "Marketing Expense",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Advertising and marketing costs"
+  },
+  {
+    "account_code": "5600",
+    "account_name": "Travel Expense",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Business travel and transportation"
+  },
+  {
+    "account_code": "5700",
+    "account_name": "Professional Services",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Legal, accounting, consulting fees"
+  },
+  {
+    "account_code": "5800",
+    "account_name": "Depreciation Expense",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Depreciation of fixed assets"
+  },
+  {
+    "account_code": "5900",
+    "account_name": "Interest Expense",
+    "account_type": "expense",
+    "parent_account": null,
+    "is_active": true,
+    "description": "Interest paid on loans and credit"
+  }
+]
