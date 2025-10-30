@@ -57,6 +57,17 @@ class OrganizationInfo(BaseModel):
 class BankDetails(BaseModel):
     iban: str
     account_holder: str
+
+
+class GmailCredentials(BaseModel):
+    token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    token_uri: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    scopes: Optional[List[str]] = None
+
+
 class PaymentMethod(str, Enum):
     stripe = "Stripe"
     redsys = "Redsys"
@@ -89,6 +100,9 @@ class UserCreate(BaseModel):
     type_of_administration: Optional[str] = None
     other_certificate: Optional[List[OtherCertificate]] = []
     status: Optional[bool] = False
+    gmail_credentials: Optional[GmailCredentials] = None
+
+
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
@@ -233,6 +247,7 @@ async def signup(
         "password_hash": hashed_pw,
         "certificate_path": cert_path if has_digital_certificate == "yes_flow" else None,
         "created_at": datetime.utcnow(),
+        "gmail_credentials": user.gmail_credentials.dict() if user.gmail_credentials else None,
     })
 
     # Organization handling
