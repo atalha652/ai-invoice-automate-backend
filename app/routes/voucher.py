@@ -262,16 +262,18 @@ async def get_vouchers(
 # Pydantic models for request bodies
 class ApprovalRequest(BaseModel):
     approver_id: str = Field(..., description="ID of the user who will approve")
+    voucher_ids: List[str] = Field(..., description="List of voucher IDs to approve")
+    notes: Optional[str] = Field(None, description="Approval notes")
 
 
 class BulkApprovalRequest(BaseModel):
     voucher_ids: List[str] = Field(..., description="List of voucher IDs to send for approval")
     approver_id: str = Field(..., description="ID of the user who will approve")
 
-
 class RejectionRequest(BaseModel):
     rejected_by: str = Field(..., description="ID of the user rejecting the voucher")
     rejection_reason: str = Field(..., description="Reason for rejection")
+    voucher_ids: List[str] = Field(..., description="List of voucher IDs to reject")
 
 
 class ClassificationRequest(BaseModel):
@@ -285,7 +287,7 @@ class ForwardRequest(BaseModel):
     reason: Optional[str] = Field(None, description="Reason for forwarding")
 
 
-@router.post("/bulk/approve-request")
+@router.post("/send-for-request")
 async def send_multiple_for_approval(
     approval_data: BulkApprovalRequest
 ):
@@ -432,145 +434,185 @@ async def send_for_approval(
         raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
 
-@router.post("/{voucher_id}/approve")
-async def approve_voucher(
-    voucher_id: str,
-    approver_id: str = Query(..., description="ID of the user approving the voucher"),
-    notes: Optional[str] = Query(None, description="Approval notes")
+@router.post("/approve")
+async def approve_vouchers(
+    approval_data: ApprovalRequest
 ):
     """
-    Approve a voucher.
-    Changes status to 'approved'.
-    Example: POST /accounting/voucher/68f880bcadf2e0b66e482d11/approve?approver_id=123
+    Approve multiple vouchers.
+    Changes status to 'approved' for all specified vouchers.
+    
+    Example: POST /accounting/voucher/approve
+    Body: {
+        "voucher_ids": ["68f880bcadf2e0b66e482d11", "68f880bcadf2e0b66e482d12"],
+        "approver_id": "123",
+        "notes": "All documents verified"
+    }
     """
     try:
-        obj_id = ObjectId(voucher_id)
-        
-        # Check if voucher exists
-        voucher = voucher_collection.find_one({"_id": obj_id})
-        if not voucher:
-            raise HTTPException(status_code=404, detail="Voucher not found")
-        
-        # Check if voucher is awaiting approval
-        current_status = voucher.get("status")
-        if current_status != "awaiting_approval":
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Cannot approve. Voucher status is '{current_status}', expected 'awaiting_approval'"
-            )
-        
-        # Verify approver
-        assigned_approver = voucher.get("approver_id")
-        if assigned_approver and assigned_approver != approver_id:
-            raise HTTPException(
-                status_code=403, 
-                detail=f"Unauthorized. This voucher is assigned to approver: {assigned_approver}"
-            )
-        
-        # Update voucher to approved
-        update_data = {
-            "status": "approved",
-            "approved_by": approver_id,
-            "approved_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow()
+        results = {
+            "successful": [],
+            "failed": []
         }
         
-        if notes:
-            update_data["approval_notes"] = notes
-        
-        result = voucher_collection.update_one(
-            {"_id": obj_id},
-            {"$set": update_data}
-        )
-        
-        if result.modified_count == 0:
-            raise HTTPException(status_code=500, detail="Failed to approve voucher")
-        
-        # Get updated voucher
-        updated_voucher = voucher_collection.find_one({"_id": obj_id})
-        updated_voucher["_id"] = str(updated_voucher["_id"])
-        if "created_at" in updated_voucher:
-            updated_voucher["created_at"] = updated_voucher["created_at"].strftime("%Y-%m-%d %H:%M:%S")
-        if "approved_at" in updated_voucher:
-            updated_voucher["approved_at"] = updated_voucher["approved_at"].strftime("%Y-%m-%d %H:%M:%S")
-        if "updated_at" in updated_voucher:
-            updated_voucher["updated_at"] = updated_voucher["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+        for voucher_id in approval_data.voucher_ids:
+            try:
+                obj_id = ObjectId(voucher_id)
+                
+                # Check if voucher exists
+                voucher = voucher_collection.find_one({"_id": obj_id})
+                if not voucher:
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": "Voucher not found"
+                    })
+                    continue
+                
+                # Check if voucher is awaiting approval
+                current_status = voucher.get("status")
+                if current_status != "awaiting_approval":
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": f"Cannot approve. Voucher status is '{current_status}', expected 'awaiting_approval'"
+                    })
+                    continue
+                
+                # Verify approver
+                assigned_approver = voucher.get("approver_id")
+                if assigned_approver and assigned_approver != approval_data.approver_id:
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": f"Unauthorized. This voucher is assigned to approver: {assigned_approver}"
+                    })
+                    continue
+                
+                # Update voucher to approved
+                update_data = {
+                    "status": "approved",
+                    "approved_by": approval_data.approver_id,
+                    "approved_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+                
+                if approval_data.notes:
+                    update_data["approval_notes"] = approval_data.notes
+                
+                result = voucher_collection.update_one(
+                    {"_id": obj_id},
+                    {"$set": update_data}
+                )
+                
+                if result.modified_count > 0:
+                    results["successful"].append({
+                        "voucher_id": voucher_id,
+                        "status": "approved"
+                    })
+                else:
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": "Failed to approve voucher"
+                    })
+                    
+            except Exception as e:
+                results["failed"].append({
+                    "voucher_id": voucher_id,
+                    "reason": str(e)
+                })
         
         return {
-            "message": "Voucher approved successfully",
-            "voucher": updated_voucher
+            "message": f"Processed {len(approval_data.voucher_ids)} vouchers",
+            "total_requested": len(approval_data.voucher_ids),
+            "successful_count": len(results["successful"]),
+            "failed_count": len(results["failed"]),
+            "results": results
         }
     
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
 
-@router.post("/{voucher_id}/reject")
-async def reject_voucher(
-    voucher_id: str,
+@router.post("/reject")
+async def reject_vouchers(
     rejection_data: RejectionRequest
 ):
     """
-    Reject a voucher.
-    Changes status to 'rejected' with reason.
-    Example: POST /accounting/voucher/68f880bcadf2e0b66e482d11/reject
+    Reject multiple vouchers.
+    Changes status to 'rejected' with reason for all specified vouchers.
+    
+    Example: POST /accounting/voucher/reject
     Body: {
+        "voucher_ids": ["68f880bcadf2e0b66e482d11", "68f880bcadf2e0b66e482d12"],
         "rejected_by": "123",
         "rejection_reason": "Missing documentation"
     }
     """
     try:
-        obj_id = ObjectId(voucher_id)
-        
-        # Check if voucher exists
-        voucher = voucher_collection.find_one({"_id": obj_id})
-        if not voucher:
-            raise HTTPException(status_code=404, detail="Voucher not found")
-        
-        # Check if voucher can be rejected
-        current_status = voucher.get("status")
-        if current_status in ["approved", "rejected"]:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Cannot reject. Voucher is already {current_status}"
-            )
-        
-        # Update voucher to rejected
-        update_data = {
-            "status": "rejected",
-            "rejected_by": rejection_data.rejected_by,
-            "rejection_reason": rejection_data.rejection_reason,
-            "rejected_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow()
+        results = {
+            "successful": [],
+            "failed": []
         }
         
-        result = voucher_collection.update_one(
-            {"_id": obj_id},
-            {"$set": update_data}
-        )
-        
-        if result.modified_count == 0:
-            raise HTTPException(status_code=500, detail="Failed to reject voucher")
-        
-        # Get updated voucher
-        updated_voucher = voucher_collection.find_one({"_id": obj_id})
-        updated_voucher["_id"] = str(updated_voucher["_id"])
-        if "created_at" in updated_voucher:
-            updated_voucher["created_at"] = updated_voucher["created_at"].strftime("%Y-%m-%d %H:%M:%S")
-        if "rejected_at" in updated_voucher:
-            updated_voucher["rejected_at"] = updated_voucher["rejected_at"].strftime("%Y-%m-%d %H:%M:%S")
-        if "updated_at" in updated_voucher:
-            updated_voucher["updated_at"] = updated_voucher["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+        for voucher_id in rejection_data.voucher_ids:
+            try:
+                obj_id = ObjectId(voucher_id)
+                
+                # Check if voucher exists
+                voucher = voucher_collection.find_one({"_id": obj_id})
+                if not voucher:
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": "Voucher not found"
+                    })
+                    continue
+                
+                # Check if voucher can be rejected
+                current_status = voucher.get("status")
+                if current_status in ["approved", "rejected"]:
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": f"Cannot reject. Voucher is already {current_status}"
+                    })
+                    continue
+                
+                # Update voucher to rejected
+                update_data = {
+                    "status": "rejected",
+                    "rejected_by": rejection_data.rejected_by,
+                    "rejection_reason": rejection_data.rejection_reason,
+                    "rejected_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+                
+                result = voucher_collection.update_one(
+                    {"_id": obj_id},
+                    {"$set": update_data}
+                )
+                
+                if result.modified_count > 0:
+                    results["successful"].append({
+                        "voucher_id": voucher_id,
+                        "status": "rejected"
+                    })
+                else:
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": "Failed to reject voucher"
+                    })
+                    
+            except Exception as e:
+                results["failed"].append({
+                    "voucher_id": voucher_id,
+                    "reason": str(e)
+                })
         
         return {
-            "message": "Voucher rejected successfully",
-            "voucher": updated_voucher
+            "message": f"Processed {len(rejection_data.voucher_ids)} vouchers",
+            "total_requested": len(rejection_data.voucher_ids),
+            "successful_count": len(results["successful"]),
+            "failed_count": len(results["failed"]),
+            "results": results
         }
     
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
