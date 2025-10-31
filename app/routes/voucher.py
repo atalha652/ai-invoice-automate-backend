@@ -248,6 +248,58 @@ class ForwardRequest(BaseModel):
     reason: Optional[str] = Field(None, description="Reason for forwarding")
 
 
+# ==================== AUDIT TRAIL MODELS ====================
+class AuditTrailEntry(BaseModel):
+    action: str = Field(..., description="Action performed (e.g., 'approval_requested', 'approved', 'rejected', 'forwarded')")
+    user_id: str = Field(..., description="ID of the user who performed the action")
+    user_name: Optional[str] = Field(None, description="Name of the user who performed the action")
+    timestamp: datetime = Field(default_factory=datetime.utcnow, description="When the action was performed")
+    details: Optional[dict] = Field(None, description="Additional details about the action")
+    notes: Optional[str] = Field(None, description="Optional notes or comments")
+
+
+# ==================== AUDIT TRAIL HELPER FUNCTIONS ====================
+def add_audit_trail_entry(voucher_id: str, action: str, user_id: str, user_name: str = None, details: dict = None, notes: str = None):
+    """Add an audit trail entry to a voucher."""
+    try:
+        # Create audit trail entry
+        audit_entry = {
+            "action": action,
+            "user_id": user_id,
+            "user_name": user_name,
+            "timestamp": datetime.utcnow(),
+            "details": details or {},
+            "notes": notes
+        }
+        
+        # Add to voucher's audit trail
+        result = voucher_collection.update_one(
+            {"_id": ObjectId(voucher_id)},
+            {"$push": {"audit_trail": audit_entry}}
+        )
+        
+        return result.modified_count > 0
+    except Exception as e:
+        print(f"Error adding audit trail entry: {str(e)}")
+        return False
+
+
+def format_audit_trail(audit_trail: list) -> list:
+    """Format audit trail entries for API response."""
+    formatted_trail = []
+    for entry in audit_trail:
+        formatted_entry = {
+            "action": entry.get("action"),
+            "user_id": entry.get("user_id"),
+            "user_name": entry.get("user_name"),
+            "timestamp": entry.get("timestamp").strftime("%Y-%m-%d %H:%M:%S") if entry.get("timestamp") else None,
+            "details": entry.get("details", {}),
+            "notes": entry.get("notes")
+        }
+        formatted_trail.append(formatted_entry)
+    return formatted_trail
+
+
 @router.post("/{voucher_id}/approve-request")
 async def send_for_approval(
     voucher_id: str,
@@ -295,6 +347,21 @@ async def send_for_approval(
         
         if result.modified_count == 0:
             raise HTTPException(status_code=500, detail="Failed to update voucher")
+        
+        # Add audit trail entry
+        audit_details = {
+            "approver_id": approval_data.approver_id,
+            "approver_name": getattr(approval_data, 'approver_name', None),
+            "previous_status": current_status
+        }
+        add_audit_trail_entry(
+            voucher_id=voucher_id,
+            action="approval_requested",
+            user_id=approval_data.approver_id,  # The requester ID should be passed separately in a real app
+            user_name=getattr(approval_data, 'approver_name', None),
+            details=audit_details,
+            notes=getattr(approval_data, 'notes', None)
+        )
         
         # Get updated voucher
         updated_voucher = voucher_collection.find_one({"_id": obj_id})
@@ -371,6 +438,20 @@ async def approve_voucher(
         if result.modified_count == 0:
             raise HTTPException(status_code=500, detail="Failed to approve voucher")
         
+        # Add audit trail entry
+        audit_details = {
+            "approved_by": approver_id,
+            "previous_status": current_status,
+            "assigned_approver": assigned_approver
+        }
+        add_audit_trail_entry(
+            voucher_id=voucher_id,
+            action="approved",
+            user_id=approver_id,
+            details=audit_details,
+            notes=notes
+        )
+        
         # Get updated voucher
         updated_voucher = voucher_collection.find_one({"_id": obj_id})
         updated_voucher["_id"] = str(updated_voucher["_id"])
@@ -438,6 +519,20 @@ async def reject_voucher(
         
         if result.modified_count == 0:
             raise HTTPException(status_code=500, detail="Failed to reject voucher")
+        
+        # Add audit trail entry
+        audit_details = {
+            "rejected_by": rejection_data.rejected_by,
+            "rejection_reason": rejection_data.rejection_reason,
+            "previous_status": current_status
+        }
+        add_audit_trail_entry(
+            voucher_id=voucher_id,
+            action="rejected",
+            user_id=rejection_data.rejected_by,
+            details=audit_details,
+            notes=rejection_data.rejection_reason
+        )
         
         # Get updated voucher
         updated_voucher = voucher_collection.find_one({"_id": obj_id})
@@ -773,6 +868,20 @@ async def forward_voucher(
         if result.modified_count == 0:
             raise HTTPException(status_code=500, detail="Failed to forward voucher")
         
+        # Add audit trail entry
+        audit_details = {
+            "from_approver_id": forward_data.current_approver_id,
+            "to_approver_id": forward_data.new_approver_id,
+            "reason": forward_data.reason
+        }
+        add_audit_trail_entry(
+            voucher_id=voucher_id,
+            action="forwarded",
+            user_id=forward_data.current_approver_id,
+            details=audit_details,
+            notes=forward_data.reason
+        )
+        
         # Get updated voucher
         updated_voucher = voucher_collection.find_one({"_id": obj_id})
         updated_voucher["_id"] = str(updated_voucher["_id"])
@@ -838,6 +947,159 @@ async def get_forwarding_history(voucher_id: str):
             "current_approver_id": voucher.get("approver_id"),
             "total_forwards": len(formatted_history),
             "forwarding_history": formatted_history
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
+
+
+@router.get("/{voucher_id}/audit-trail")
+async def get_voucher_audit_trail(voucher_id: str):
+    """
+    Get the complete audit trail for a specific voucher.
+    Shows all actions performed on the voucher with timestamps and details.
+    
+    Example: GET /accounting/voucher/68f880bcadf2e0b66e482d11/audit-trail
+    """
+    try:
+        obj_id = ObjectId(voucher_id)
+        
+        # Check if voucher exists
+        voucher = voucher_collection.find_one({"_id": obj_id})
+        if not voucher:
+            raise HTTPException(status_code=404, detail="Voucher not found")
+        
+        # Get audit trail
+        audit_trail = voucher.get("audit_trail", [])
+        
+        # Format audit trail
+        formatted_trail = format_audit_trail(audit_trail)
+        
+        return {
+            "voucher_id": voucher_id,
+            "total_entries": len(formatted_trail),
+            "audit_trail": formatted_trail
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
+
+
+@router.get("/audit-trail")
+async def get_audit_trails(
+    user_id: Optional[str] = Query(None, description="Filter by user ID who performed actions"),
+    action: Optional[str] = Query(None, description="Filter by action type (approval_requested, approved, rejected, forwarded)"),
+    start_date: Optional[str] = Query(None, description="Start date filter (YYYY-MM-DD format)"),
+    end_date: Optional[str] = Query(None, description="End date filter (YYYY-MM-DD format)"),
+    limit: int = Query(50, description="Number of results to return", ge=1, le=100),
+    offset: int = Query(0, description="Number of results to skip", ge=0)
+):
+    """
+    Get audit trails across all vouchers with optional filtering.
+    
+    Example: GET /accounting/voucher/audit-trail?user_id=123&action=approved&limit=20
+    """
+    try:
+        # Build aggregation pipeline
+        pipeline = []
+        
+        # Match stage for filtering
+        match_conditions = {}
+        
+        # Add date range filter if provided
+        if start_date or end_date:
+            date_filter = {}
+            if start_date:
+                try:
+                    start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
+                    date_filter["$gte"] = start_datetime
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid start_date format. Use YYYY-MM-DD")
+            
+            if end_date:
+                try:
+                    end_datetime = datetime.strptime(end_date, "%Y-%m-%d")
+                    # Add 23:59:59 to include the entire end date
+                    end_datetime = end_datetime.replace(hour=23, minute=59, second=59)
+                    date_filter["$lte"] = end_datetime
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid end_date format. Use YYYY-MM-DD")
+            
+            match_conditions["audit_trail.timestamp"] = date_filter
+        
+        # Add match stage if there are conditions
+        if match_conditions:
+            pipeline.append({"$match": match_conditions})
+        
+        # Unwind audit trail entries
+        pipeline.append({"$unwind": "$audit_trail"})
+        
+        # Additional filtering on unwound entries
+        unwind_match = {}
+        if user_id:
+            unwind_match["audit_trail.user_id"] = user_id
+        if action:
+            unwind_match["audit_trail.action"] = action
+        
+        if unwind_match:
+            pipeline.append({"$match": unwind_match})
+        
+        # Sort by timestamp (newest first)
+        pipeline.append({"$sort": {"audit_trail.timestamp": -1}})
+        
+        # Add voucher info and format output
+        pipeline.append({
+            "$project": {
+                "voucher_id": {"$toString": "$_id"},
+                "voucher_number": "$voucher_number",
+                "action": "$audit_trail.action",
+                "user_id": "$audit_trail.user_id",
+                "user_name": "$audit_trail.user_name",
+                "timestamp": "$audit_trail.timestamp",
+                "details": "$audit_trail.details",
+                "notes": "$audit_trail.notes"
+            }
+        })
+        
+        # Get total count for pagination
+        count_pipeline = pipeline.copy()
+        count_pipeline.append({"$count": "total"})
+        count_result = list(voucher_collection.aggregate(count_pipeline))
+        total_count = count_result[0]["total"] if count_result else 0
+        
+        # Add pagination
+        pipeline.extend([
+            {"$skip": offset},
+            {"$limit": limit}
+        ])
+        
+        # Execute aggregation
+        results = list(voucher_collection.aggregate(pipeline))
+        
+        # Format timestamps
+        formatted_results = []
+        for entry in results:
+            formatted_entry = {
+                "voucher_id": entry["voucher_id"],
+                "voucher_number": entry.get("voucher_number"),
+                "action": entry["action"],
+                "user_id": entry["user_id"],
+                "user_name": entry.get("user_name"),
+                "timestamp": entry["timestamp"].strftime("%Y-%m-%d %H:%M:%S") if entry.get("timestamp") else None,
+                "details": entry.get("details"),
+                "notes": entry.get("notes")
+            }
+            formatted_results.append(formatted_entry)
+        
+        return {
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "audit_trails": formatted_results
         }
     
     except HTTPException:
