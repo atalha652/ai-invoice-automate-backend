@@ -264,6 +264,11 @@ class ApprovalRequest(BaseModel):
     approver_id: str = Field(..., description="ID of the user who will approve")
 
 
+class BulkApprovalRequest(BaseModel):
+    voucher_ids: List[str] = Field(..., description="List of voucher IDs to send for approval")
+    approver_id: str = Field(..., description="ID of the user who will approve")
+
+
 class RejectionRequest(BaseModel):
     rejected_by: str = Field(..., description="ID of the user rejecting the voucher")
     rejection_reason: str = Field(..., description="Reason for rejection")
@@ -278,6 +283,90 @@ class ForwardRequest(BaseModel):
     current_approver_id: str = Field(..., description="ID of the current approver forwarding the voucher")
     new_approver_id: str = Field(..., description="ID of the new approver to forward to")
     reason: Optional[str] = Field(None, description="Reason for forwarding")
+
+
+@router.post("/bulk/approve-request")
+async def send_multiple_for_approval(
+    approval_data: BulkApprovalRequest
+):
+    """
+    Send multiple vouchers for approval in bulk.
+    Changes status to 'awaiting_approval' and assigns an approver for all specified vouchers.
+    
+    Example: POST /accounting/voucher/bulk/approve-request
+    Body: {
+        "voucher_ids": ["68f880bcadf2e0b66e482d11", "68f880bcadf2e0b66e482d12"],
+        "approver_id": "123"
+    }
+    """
+    try:
+        results = {
+            "successful": [],
+            "failed": []
+        }
+        
+        for voucher_id in approval_data.voucher_ids:
+            try:
+                obj_id = ObjectId(voucher_id)
+                
+                # Check if voucher exists
+                voucher = voucher_collection.find_one({"_id": obj_id})
+                if not voucher:
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": "Voucher not found"
+                    })
+                    continue
+                
+                # Check if voucher is in a valid state for approval request
+                current_status = voucher.get("status")
+                if current_status in ["approved", "rejected"]:
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": f"Voucher is already {current_status}"
+                    })
+                    continue
+                
+                # Update voucher with approval request details
+                update_data = {
+                    "status": "awaiting_approval",
+                    "approver_id": approval_data.approver_id,
+                    "approval_requested_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+                
+                result = voucher_collection.update_one(
+                    {"_id": obj_id},
+                    {"$set": update_data}
+                )
+                
+                if result.modified_count > 0:
+                    results["successful"].append({
+                        "voucher_id": voucher_id,
+                        "status": "awaiting_approval"
+                    })
+                else:
+                    results["failed"].append({
+                        "voucher_id": voucher_id,
+                        "reason": "Failed to update voucher"
+                    })
+                    
+            except Exception as e:
+                results["failed"].append({
+                    "voucher_id": voucher_id,
+                    "reason": str(e)
+                })
+        
+        return {
+            "message": f"Processed {len(approval_data.voucher_ids)} vouchers",
+            "total_requested": len(approval_data.voucher_ids),
+            "successful_count": len(results["successful"]),
+            "failed_count": len(results["failed"]),
+            "results": results
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
 
 @router.post("/{voucher_id}/approve-request")
