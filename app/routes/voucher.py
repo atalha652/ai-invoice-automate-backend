@@ -94,6 +94,9 @@ def upload_to_s3(user_id, project_id, file: UploadFile, folder_type="Package"):
 async def upload_voucher(
     user_id: str = Form(..., description="User ID of the person uploading the voucher"),
     files: List[UploadFile] = File(...),   # Accept multiple files
+    title: Optional[str] = Form(None, description="Optional title for the voucher"),
+    description: Optional[str] = Form(None, description="Optional description for the voucher"),
+    category: Optional[str] = Form(None, description="Optional category name for the voucher")
 ):
     # Step 1: Validate all files
     for file in files:
@@ -107,6 +110,15 @@ async def upload_voucher(
         "created_at": datetime.utcnow(),
         "files": []  # to store file metadata
     }
+    
+    # Add optional fields if provided
+    if title:
+        new_voucher["title"] = title
+    if description:
+        new_voucher["description"] = description
+    if category:
+        new_voucher["category"] = category
+    
     result = voucher_collection.insert_one(new_voucher)
     voucher_id = str(result.inserted_id)
 
@@ -141,13 +153,23 @@ async def upload_voucher(
     )
 
     # Step 5: Return response
-    return {
+    response = {
         "message": "Voucher uploaded successfully",
         "voucher_id": voucher_id,
         "user_id": user_id,
         "files": file_records,
         "status": "pending"
     }
+    
+    # Include optional fields in response if provided
+    if title:
+        response["title"] = title
+    if description:
+        response["description"] = description
+    if category:
+        response["category"] = category
+    
+    return response
 
 
 @router.get("/awaiting-approval")
@@ -177,6 +199,9 @@ async def get_awaiting_approval_vouchers(
             voucher["approval_requested_at"] = voucher["approval_requested_at"].strftime("%Y-%m-%d %H:%M:%S")
         if "updated_at" in voucher:
             voucher["updated_at"] = voucher["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+        # Ensure rejection_count is included (default to 0 if not present)
+        if "rejection_count" not in voucher:
+            voucher["rejection_count"] = 0
 
     return {
         "count": len(vouchers),
@@ -322,10 +347,10 @@ async def send_multiple_for_approval(
                 
                 # Check if voucher is in a valid state for approval request
                 current_status = voucher.get("status")
-                if current_status in ["approved", "rejected"]:
+                if current_status == "approved":
                     results["failed"].append({
                         "voucher_id": voucher_id,
-                        "reason": f"Voucher is already {current_status}"
+                        "reason": f"Voucher is already approved"
                     })
                     continue
                 
@@ -391,10 +416,10 @@ async def send_for_approval(
         
         # Check if voucher is in a valid state for approval request
         current_status = voucher.get("status")
-        if current_status in ["approved", "rejected"]:
+        if current_status == "approved":
             raise HTTPException(
                 status_code=400, 
-                detail=f"Cannot send for approval. Voucher is already {current_status}"
+                detail=f"Cannot send for approval. Voucher is already approved"
             )
         
         # Update voucher with approval request details
@@ -574,13 +599,18 @@ async def reject_vouchers(
                     })
                     continue
                 
+                # Get current rejection count and increment it
+                current_rejection_count = voucher.get("rejection_count", 0)
+                new_rejection_count = current_rejection_count + 1
+                
                 # Update voucher to rejected
                 update_data = {
                     "status": "rejected",
                     "rejected_by": rejection_data.rejected_by,
                     "rejection_reason": rejection_data.rejection_reason,
                     "rejected_at": datetime.utcnow(),
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.utcnow(),
+                    "rejection_count": new_rejection_count
                 }
                 
                 result = voucher_collection.update_one(
