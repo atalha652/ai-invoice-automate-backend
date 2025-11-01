@@ -96,12 +96,17 @@ async def upload_voucher(
     files: List[UploadFile] = File(...),   # Accept multiple files
     title: Optional[str] = Form(None, description="Optional title for the voucher"),
     description: Optional[str] = Form(None, description="Optional description for the voucher"),
-    category: Optional[str] = Form(None, description="Optional category name for the voucher")
+    category: Optional[str] = Form(None, description="Optional category name for the voucher"),
+    transaction_type: Optional[str] = Form(None, description="Transaction type: 'credit' or 'debit'")
 ):
     # Step 1: Validate all files
     for file in files:
         if file.content_type not in ["image/png", "image/jpeg", "application/pdf"]:
             raise HTTPException(status_code=400, detail="Only image or PDF allowed")
+    
+    # Step 1.5: Validate transaction_type if provided
+    if transaction_type and transaction_type not in ["credit", "debit"]:
+        raise HTTPException(status_code=400, detail="transaction_type must be either 'credit' or 'debit'")
 
     # Step 2: Create new voucher record with status "pending"
     new_voucher = {
@@ -118,6 +123,8 @@ async def upload_voucher(
         new_voucher["description"] = description
     if category:
         new_voucher["category"] = category
+    if transaction_type:
+        new_voucher["transaction_type"] = transaction_type
     
     result = voucher_collection.insert_one(new_voucher)
     voucher_id = str(result.inserted_id)
