@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routes import api, auth, project, report, accounting, voucher, ledger, ocr, gmail_api, ledgers
+from app.routes import api, auth, project, report, accounting, voucher, ledger, ocr, gmail_api, ledgers, dashboard
 from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
 # CORS settings
@@ -22,6 +22,7 @@ app.include_router(ledger.router, prefix="/api")
 app.include_router(ocr.router, prefix="/api")
 app.include_router(gmail_api.router, prefix="/api")
 app.include_router(ledgers.router, prefix="/api")
+app.include_router(dashboard.router, prefix="/api")
 @app.get("/")
 def root():
     return {"message": "Welcome to my FastAPI app"}
