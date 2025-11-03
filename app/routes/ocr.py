@@ -126,8 +126,21 @@ Extract structured invoice data from the given invoice text and compute VAT corr
   - Total_with_Tax = round(total + VAT_amount, 2)
 - If VAT_rate = 0, VAT_amount must be 0 and Total_with_Tax = total.
 
+💳 Transaction Type Rules:
+- Analyze the document to determine if it represents money coming in (credit) or going out (debit)
+- Use "debit" for:
+  * Invoices/bills you need to pay (supplier invoices, purchase orders)
+  * Expenses, purchases, payments made
+  * Money going OUT of your account
+- Use "credit" for:
+  * Invoices you send to customers (sales invoices)
+  * Income, revenue, payments received
+  * Money coming IN to your account
+- Look for keywords like "Invoice To", "Bill To", "Receipt", "Payment", "Purchase", "Sale"
+
 🧾 Output format (as valid JSON, no extra text):
 {{
+  "transaction_type": "debit",
   "supplier": {{
     "business_name": "...",
     "address_line1": "...",
@@ -216,6 +229,13 @@ def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: l
         
         for voucher in vouchers:
             voucher_id = str(voucher["_id"])
+            
+            # Update voucher OCR status to "processing"
+            voucher_collection.update_one(
+                {"_id": ObjectId(voucher_id)},
+                {"$set": {"OCR": "processing", "ocr_started_at": datetime.utcnow()}}
+            )
+            voucher_id = str(voucher["_id"])
             files = voucher.get("files", [])
             
             voucher_ocr_results = []
@@ -298,22 +318,29 @@ def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: l
             
             # Check if all files were successfully processed
             all_success = all(file["status"] == "success" for file in voucher_ocr_results)
+            any_failed = any(file["status"] == "failed" for file in voucher_ocr_results)
             
             # Update voucher with OCR status
             if all_success and len(voucher_ocr_results) > 0:
                 voucher_collection.update_one(
                     {"_id": ObjectId(voucher_id)},
-                    {"$set": {"OCR": "Done", "ocr_completed_at": datetime.utcnow()}}
+                    {"$set": {"OCR": "done", "ocr_completed_at": datetime.utcnow()}}
                 )
-                ocr_status = "Done"
-            elif len(voucher_ocr_results) > 0:
+                ocr_status = "done"
+            elif any_failed and not all_success and len(voucher_ocr_results) > 0:
                 voucher_collection.update_one(
                     {"_id": ObjectId(voucher_id)},
-                    {"$set": {"OCR": "Partial", "ocr_completed_at": datetime.utcnow()}}
+                    {"$set": {"OCR": "partial", "ocr_completed_at": datetime.utcnow()}}
                 )
-                ocr_status = "Partial"
+                ocr_status = "partial"
+            elif len(voucher_ocr_results) == 0:
+                voucher_collection.update_one(
+                    {"_id": ObjectId(voucher_id)},
+                    {"$set": {"OCR": "failed", "ocr_completed_at": datetime.utcnow()}}
+                )
+                ocr_status = "failed"
             else:
-                ocr_status = "No files"
+                ocr_status = "unknown"
             
             results.append({
                 "voucher_id": voucher_id,

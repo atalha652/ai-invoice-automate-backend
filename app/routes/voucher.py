@@ -112,6 +112,7 @@ async def upload_voucher(
     new_voucher = {
         "user_id": user_id,
         "status": "pending",
+        "OCR": "pending",  # OCR status field
         "created_at": datetime.utcnow(),
         "files": []  # to store file metadata
     }
@@ -165,7 +166,8 @@ async def upload_voucher(
         "voucher_id": voucher_id,
         "user_id": user_id,
         "files": file_records,
-        "status": "pending"
+        "status": "pending",
+        "OCR": "pending"
     }
     
     # Include optional fields in response if provided
@@ -175,6 +177,8 @@ async def upload_voucher(
         response["description"] = description
     if category:
         response["category"] = category
+    if transaction_type:
+        response["transaction_type"] = transaction_type
     
     return response
 
@@ -533,7 +537,6 @@ async def approve_vouchers(
                     {"_id": obj_id},
                     {"$set": update_data}
                 )
-                
                 if result.modified_count > 0:
                     results["successful"].append({
                         "voucher_id": voucher_id,
