@@ -220,6 +220,44 @@ async def get_awaiting_approval_vouchers(
     }
 
 
+@router.get("/approved")
+async def get_approved_vouchers(
+    user_id: str = Query(..., description="User ID to fetch vouchers for")
+):
+    """
+    Get all vouchers for a specific user with status 'approved'.
+    Example: GET /accounting/voucher/approved?user_id=123
+    """
+    query = {
+        "user_id": user_id,
+        "status": "approved"
+    }
+
+    vouchers = list(voucher_collection.find(query).sort("approved_at", -1))
+
+    if not vouchers:
+        raise HTTPException(status_code=404, detail="No vouchers found with status 'approved'")
+
+    # Convert ObjectId and datetime for readability
+    for voucher in vouchers:
+        voucher["_id"] = str(voucher["_id"])
+        if "created_at" in voucher:
+            voucher["created_at"] = voucher["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "approval_requested_at" in voucher:
+            voucher["approval_requested_at"] = voucher["approval_requested_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "approved_at" in voucher:
+            voucher["approved_at"] = voucher["approved_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "updated_at" in voucher:
+            voucher["updated_at"] = voucher["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "ocr_completed_at" in voucher:
+            voucher["ocr_completed_at"] = voucher["ocr_completed_at"].strftime("%Y-%m-%d %H:%M:%S")
+
+    return {
+        "count": len(vouchers),
+        "vouchers": vouchers
+    }
+
+
 @router.get("/{voucher_id}")
 async def get_voucher_by_id(
     voucher_id: str,
