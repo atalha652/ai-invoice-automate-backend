@@ -200,10 +200,10 @@ def OCR(image_bytes: bytes) -> str:
 def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: list):
     """Background task to process vouchers"""
     try:
-        # Update job status to processing
+        # Update job status to processing (in progress)
         ocr_jobs_collection.update_one(
             {"_id": ObjectId(job_id)},
-            {"$set": {"status": "processing", "started_at": datetime.utcnow()}}
+            {"$set": {"status": "awaiting", "started_at": datetime.utcnow()}}
         )
         
         # Fetch vouchers from collection
@@ -322,11 +322,11 @@ def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: l
                 "files": voucher_ocr_results
             })
         
-        # Update job status to completed
+        # Update job status to success
         ocr_jobs_collection.update_one(
             {"_id": ObjectId(job_id)},
             {"$set": {
-                "status": "completed",
+                "status": "success",
                 "completed_at": datetime.utcnow(),
                 "results": results
             }}
@@ -419,7 +419,7 @@ async def extract_text_from_s3(
         job_doc = {
             "user_id": user_id,
             "voucher_ids": voucher_id_list,
-            "status": "pending",
+            "status": "awaiting",
             "total_vouchers": voucher_count,
             "created_at": datetime.utcnow()
         }
@@ -434,7 +434,7 @@ async def extract_text_from_s3(
             "job_id": job_id,
             "user_id": user_id,
             "total_vouchers": voucher_count,
-            "status": "pending",
+            "status": "awaiting",
             "check_status_url": f"/accounting/ocr/job/{job_id}"
         }
         
@@ -470,53 +470,6 @@ async def get_ocr_job_status(job_id: str):
             "results": job.get("results")
         }
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/ocr/{project_id}")
-async def get_ocr_results(project_id: str, user_id: str):
-    try:
-        # ✅ Step 1: Fetch project details
-        project = projects_collection.find_one(
-            {"_id": ObjectId(project_id), "user_id": user_id},
-            {"title": 1, "description": 1, "color": 1, "status": 1, "files": 1, "total_images": 1, "processed_count": 1}
-        )
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-
-        # ✅ Step 2: Extract file URLs from project
-        file_urls = []
-        if "files" in project and isinstance(project["files"], list):
-            file_urls = [f.get("file_url") for f in project["files"] if "file_url" in f]
-
-        # ✅ Step 3: Fetch OCR logs for this project
-        ocr_logs = list(ocr_collection.find(
-            {"project_id": project_id, "user_id": user_id},
-            {"_id": 1, "result_url": 1, "package_key": 1, "pdf_text": 1, "status": 1, "created_at": 1}
-        ))
-
-        results = []
-        for log in ocr_logs:
-            results.append({
-                "ocr_id": str(log["_id"]),
-                "result_url": log.get("result_url"),
-                "package_key": log.get("package_key"),
-                "status": log.get("status"),
-                "created_at": log.get("created_at"),
-                "ocr_text": log.get("pdf_text")
-            })
-
-        return {
-            "project_id": project_id,
-            "user_id": user_id,
-            "status": project.get("status", "Unknown"),
-            "total_images": project.get("total_images", 0),
-            "processed_count": project.get("processed_count", 0),
-            "file_urls": file_urls,      # ✅ All original file URLs
-            "results": results           # ✅ Includes result_url for each processed file
-        }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
