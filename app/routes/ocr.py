@@ -261,14 +261,29 @@ def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: l
                             # URL decode the S3 key
                             s3_key = unquote(s3_key)
                             
-                            # Download image from S3
-                            img_stream = io.BytesIO()
-                            s3.download_fileobj(bucket_name, s3_key, img_stream)
-                            img_stream.seek(0)
-                            image_bytes = img_stream.getvalue()
+                            # Download file from S3
+                            file_stream = io.BytesIO()
+                            s3.download_fileobj(bucket_name, s3_key, file_stream)
+                            file_stream.seek(0)
+                            file_bytes = file_stream.getvalue()
                             
-                            # Process through OCR
-                            raw_text = OCR(image_bytes)
+                            # Detect file type and process accordingly
+                            raw_text = ""
+                            file_extension = s3_key.lower().split('.')[-1]
+                            
+                            if file_extension == 'pdf':
+                                # Handle PDF files
+                                raw_text = extract_text_from_pdf(file_bytes)
+                            elif file_extension in ['txt', 'text']:
+                                # Handle text files
+                                raw_text = file_bytes.decode('utf-8', errors='ignore')
+                            elif file_extension in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff']:
+                                # Handle image files
+                                mime_type = 'image/jpeg' if file_extension in ['jpg', 'jpeg'] else f'image/{file_extension}'
+                                raw_text = OCR(file_bytes, mime_type=mime_type)
+                            else:
+                                raise ValueError(f"Unsupported file type: {file_extension}")
+                            
                             cleaned_text = clean_ocr_text(raw_text)
                             
                             # Pass cleaned text to LLM for invoice extraction
