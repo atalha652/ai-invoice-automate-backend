@@ -78,7 +78,7 @@ SCOPES = [
     'openid'
 ]
 # Allow overriding via env var to match your running port/domain
-REDIRECT_URI = os.getenv("GMAIL_REDIRECT_URI", "http://localhost:8003/api/gmail/oauth2/callback")
+REDIRECT_URI = os.getenv("GMAIL_REDIRECT_URI", "https://ai-invoice-automate-backend-njgp.onrender.com/api/gmail/oauth2/callback")
 
 @router.get("/auth", response_model=AuthResponse)
 async def authenticate_gmail():
