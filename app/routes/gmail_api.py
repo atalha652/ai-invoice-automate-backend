@@ -8,9 +8,11 @@ import sys
 from google_auth_oauthlib.flow import Flow
 from pymongo import MongoClient
 from bson import ObjectId
+from dotenv import load_dotenv
 
 # Add the parent directory to the path to import services
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+load_dotenv()
 
 from services.gmail_service import GmailService
 from routes.auth import get_current_user
@@ -70,7 +72,6 @@ db = db_client[os.getenv("DB_NAME")]
 users_collection = db["users"]
 
 # --- OAuth2 Flow Settings ---
-CLIENT_SECRETS_FILE = 'client_secret_11417407491-lgik9bmqa79n84pbm9fnkqd8u51deqim.apps.googleusercontent.com.json'
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
@@ -79,6 +80,27 @@ SCOPES = [
 ]
 # Allow overriding via env var to match your running port/domain
 REDIRECT_URI = os.getenv("GMAIL_REDIRECT_URI", "https://ai-invoice-automate-backend-njgp.onrender.com/api/gmail/oauth2/callback")
+
+# OAuth client credentials and endpoints from environment
+GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID")
+GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET")
+GMAIL_AUTH_URI = os.getenv("GMAIL_AUTH_URI", "https://accounts.google.com/o/oauth2/auth")
+GMAIL_TOKEN_URI = os.getenv("GMAIL_TOKEN_URI", "https://oauth2.googleapis.com/token")
+GMAIL_CERT_URL = os.getenv("GMAIL_CERT_URL", "https://www.googleapis.com/oauth2/v1/certs")
+
+def _build_google_client_config():
+    if not GMAIL_CLIENT_ID or not GMAIL_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Missing GMAIL_CLIENT_ID or GMAIL_CLIENT_SECRET in environment")
+    return {
+        "web": {
+            "client_id": GMAIL_CLIENT_ID,
+            "client_secret": GMAIL_CLIENT_SECRET,
+            "auth_uri": GMAIL_AUTH_URI,
+            "token_uri": GMAIL_TOKEN_URI,
+            "auth_provider_x509_cert_url": GMAIL_CERT_URL,
+            "redirect_uris": [REDIRECT_URI],
+        }
+    }
 
 @router.get("/auth", response_model=AuthResponse)
 async def authenticate_gmail():
@@ -112,8 +134,8 @@ async def oauth2_authorize(user_id: str):
     Redirects user to Google's consent screen.
     """
     try:
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE,
+        flow = Flow.from_client_config(
+            _build_google_client_config(),
             scopes=SCOPES,
             redirect_uri=REDIRECT_URI
         )
@@ -148,8 +170,8 @@ async def oauth2_callback(code: str, state: str):
         if not user:
             raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE,
+        flow = Flow.from_client_config(
+            _build_google_client_config(),
             scopes=SCOPES,
             redirect_uri=REDIRECT_URI
         )
