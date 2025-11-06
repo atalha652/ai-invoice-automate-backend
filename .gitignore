@@ -11,4 +11,4 @@ venv/
 .env
 
 # Google OAuth credentials (sensitive)
-client_secret_*.json
+
