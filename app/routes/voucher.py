@@ -94,19 +94,39 @@ def upload_to_s3(user_id, project_id, file: UploadFile, folder_type="Package"):
 async def upload_voucher(
     user_id: str = Form(..., description="User ID of the person uploading the voucher"),
     files: List[UploadFile] = File(...),   # Accept multiple files
+    title: Optional[str] = Form(None, description="Optional title for the voucher"),
+    description: Optional[str] = Form(None, description="Optional description for the voucher"),
+    category: Optional[str] = Form(None, description="Optional category name for the voucher"),
+    transaction_type: Optional[str] = Form(None, description="Transaction type: 'credit' or 'debit'")
 ):
     # Step 1: Validate all files
     for file in files:
         if file.content_type not in ["image/png", "image/jpeg", "application/pdf"]:
             raise HTTPException(status_code=400, detail="Only image or PDF allowed")
+    
+    # Step 1.5: Validate transaction_type if provided
+    if transaction_type and transaction_type not in ["credit", "debit"]:
+        raise HTTPException(status_code=400, detail="transaction_type must be either 'credit' or 'debit'")
 
     # Step 2: Create new voucher record with status "pending"
     new_voucher = {
         "user_id": user_id,
         "status": "pending",
+        "OCR": "pending",  # OCR status field
         "created_at": datetime.utcnow(),
         "files": []  # to store file metadata
     }
+    
+    # Add optional fields if provided
+    if title:
+        new_voucher["title"] = title
+    if description:
+        new_voucher["description"] = description
+    if category:
+        new_voucher["category"] = category
+    if transaction_type:
+        new_voucher["transaction_type"] = transaction_type
+    
     result = voucher_collection.insert_one(new_voucher)
     voucher_id = str(result.inserted_id)
 
@@ -141,12 +161,100 @@ async def upload_voucher(
     )
 
     # Step 5: Return response
-    return {
+    response = {
         "message": "Voucher uploaded successfully",
         "voucher_id": voucher_id,
         "user_id": user_id,
         "files": file_records,
-        "status": "pending"
+        "status": "pending",
+        "OCR": "pending"
+    }
+    
+    # Include optional fields in response if provided
+    if title:
+        response["title"] = title
+    if description:
+        response["description"] = description
+    if category:
+        response["category"] = category
+    if transaction_type:
+        response["transaction_type"] = transaction_type
+    
+    return response
+
+
+@router.get("/awaiting-approval")
+async def get_awaiting_approval_vouchers(
+    user_id: str = Query(..., description="User ID to fetch vouchers for")
+):
+    """
+    Get all vouchers for a specific user with status 'awaiting_approval'.
+    Example: GET /accounting/voucher/awaiting-approval?user_id=123
+    """
+    query = {
+        "user_id": user_id,
+        "status": "awaiting_approval"
+    }
+
+    vouchers = list(voucher_collection.find(query))
+
+    if not vouchers:
+        raise HTTPException(status_code=404, detail="No vouchers found with status 'awaiting_approval'")
+
+    # Convert ObjectId and datetime for readability
+    for voucher in vouchers:
+        voucher["_id"] = str(voucher["_id"])
+        if "created_at" in voucher:
+            voucher["created_at"] = voucher["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "approval_requested_at" in voucher:
+            voucher["approval_requested_at"] = voucher["approval_requested_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "updated_at" in voucher:
+            voucher["updated_at"] = voucher["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+        # Ensure rejection_count is included (default to 0 if not present)
+        if "rejection_count" not in voucher:
+            voucher["rejection_count"] = 0
+
+    return {
+        "count": len(vouchers),
+        "vouchers": vouchers
+    }
+
+
+@router.get("/approved")
+async def get_approved_vouchers(
+    user_id: str = Query(..., description="User ID to fetch vouchers for")
+):
+    """
+    Get all vouchers for a specific user with status 'approved'.
+    Example: GET /accounting/voucher/approved?user_id=123
+    """
+    query = {
+        "user_id": user_id,
+        "status": "approved"
+    }
+
+    vouchers = list(voucher_collection.find(query).sort("approved_at", -1))
+
+    if not vouchers:
+        raise HTTPException(status_code=404, detail="No vouchers found with status 'approved'")
+
+    # Convert ObjectId and datetime for readability
+    for voucher in vouchers:
+        voucher["_id"] = str(voucher["_id"])
+        if "created_at" in voucher:
+            voucher["created_at"] = voucher["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "approval_requested_at" in voucher:
+            voucher["approval_requested_at"] = voucher["approval_requested_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "approved_at" in voucher:
+            voucher["approved_at"] = voucher["approved_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "updated_at" in voucher:
+            voucher["updated_at"] = voucher["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "ocr_completed_at" in voucher:
+            voucher["ocr_completed_at"] = voucher["ocr_completed_at"].strftime("%Y-%m-%d %H:%M:%S")
+
+    return {
+        "count": len(vouchers),
+        "vouchers": vouchers
     }
 
 
@@ -322,10 +430,10 @@ async def send_multiple_for_approval(
                 
                 # Check if voucher is in a valid state for approval request
                 current_status = voucher.get("status")
-                if current_status in ["approved", "rejected"]:
+                if current_status == "approved":
                     results["failed"].append({
                         "voucher_id": voucher_id,
-                        "reason": f"Voucher is already {current_status}"
+                        "reason": f"Voucher is already approved"
                     })
                     continue
                 
@@ -391,10 +499,10 @@ async def send_for_approval(
         
         # Check if voucher is in a valid state for approval request
         current_status = voucher.get("status")
-        if current_status in ["approved", "rejected"]:
+        if current_status == "approved":
             raise HTTPException(
                 status_code=400, 
-                detail=f"Cannot send for approval. Voucher is already {current_status}"
+                detail=f"Cannot send for approval. Voucher is already approved"
             )
         
         # Update voucher with approval request details
@@ -501,7 +609,6 @@ async def approve_vouchers(
                     {"_id": obj_id},
                     {"$set": update_data}
                 )
-                
                 if result.modified_count > 0:
                     results["successful"].append({
                         "voucher_id": voucher_id,
@@ -574,13 +681,18 @@ async def reject_vouchers(
                     })
                     continue
                 
+                # Get current rejection count and increment it
+                current_rejection_count = voucher.get("rejection_count", 0)
+                new_rejection_count = current_rejection_count + 1
+                
                 # Update voucher to rejected
                 update_data = {
                     "status": "rejected",
                     "rejected_by": rejection_data.rejected_by,
                     "rejection_reason": rejection_data.rejection_reason,
                     "rejected_at": datetime.utcnow(),
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.utcnow(),
+                    "rejection_count": new_rejection_count
                 }
                 
                 result = voucher_collection.update_one(

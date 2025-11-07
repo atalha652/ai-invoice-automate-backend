@@ -126,8 +126,21 @@ Extract structured invoice data from the given invoice text and compute VAT corr
   - Total_with_Tax = round(total + VAT_amount, 2)
 - If VAT_rate = 0, VAT_amount must be 0 and Total_with_Tax = total.
 
+💳 Transaction Type Rules:
+- Analyze the document to determine if it represents money coming in (credit) or going out (debit)
+- Use "debit" for:
+  * Invoices/bills you need to pay (supplier invoices, purchase orders)
+  * Expenses, purchases, payments made
+  * Money going OUT of your account
+- Use "credit" for:
+  * Invoices you send to customers (sales invoices)
+  * Income, revenue, payments received
+  * Money coming IN to your account
+- Look for keywords like "Invoice To", "Bill To", "Receipt", "Payment", "Purchase", "Sale"
+
 🧾 Output format (as valid JSON, no extra text):
 {{
+  "transaction_type": "debit",
   "supplier": {{
     "business_name": "...",
     "address_line1": "...",
@@ -200,10 +213,10 @@ def OCR(image_bytes: bytes) -> str:
 def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: list):
     """Background task to process vouchers"""
     try:
-        # Update job status to processing
+        # Update job status to processing (in progress)
         ocr_jobs_collection.update_one(
             {"_id": ObjectId(job_id)},
-            {"$set": {"status": "processing", "started_at": datetime.utcnow()}}
+            {"$set": {"status": "awaiting", "started_at": datetime.utcnow()}}
         )
         
         # Fetch vouchers from collection
@@ -215,6 +228,13 @@ def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: l
         results = []
         
         for voucher in vouchers:
+            voucher_id = str(voucher["_id"])
+            
+            # Update voucher OCR status to "processing"
+            voucher_collection.update_one(
+                {"_id": ObjectId(voucher_id)},
+                {"$set": {"OCR": "processing", "ocr_started_at": datetime.utcnow()}}
+            )
             voucher_id = str(voucher["_id"])
             files = voucher.get("files", [])
             
@@ -241,14 +261,29 @@ def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: l
                             # URL decode the S3 key
                             s3_key = unquote(s3_key)
                             
-                            # Download image from S3
-                            img_stream = io.BytesIO()
-                            s3.download_fileobj(bucket_name, s3_key, img_stream)
-                            img_stream.seek(0)
-                            image_bytes = img_stream.getvalue()
+                            # Download file from S3
+                            file_stream = io.BytesIO()
+                            s3.download_fileobj(bucket_name, s3_key, file_stream)
+                            file_stream.seek(0)
+                            file_bytes = file_stream.getvalue()
                             
-                            # Process through OCR
-                            raw_text = OCR(image_bytes)
+                            # Detect file type and process accordingly
+                            raw_text = ""
+                            file_extension = s3_key.lower().split('.')[-1]
+                            
+                            if file_extension == 'pdf':
+                                # Handle PDF files
+                                raw_text = extract_text_from_pdf(file_bytes)
+                            elif file_extension in ['txt', 'text']:
+                                # Handle text files
+                                raw_text = file_bytes.decode('utf-8', errors='ignore')
+                            elif file_extension in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff']:
+                                # Handle image files
+                                mime_type = 'image/jpeg' if file_extension in ['jpg', 'jpeg'] else f'image/{file_extension}'
+                                raw_text = OCR(file_bytes, mime_type=mime_type)
+                            else:
+                                raise ValueError(f"Unsupported file type: {file_extension}")
+                            
                             cleaned_text = clean_ocr_text(raw_text)
                             
                             # Pass cleaned text to LLM for invoice extraction
@@ -298,22 +333,29 @@ def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: l
             
             # Check if all files were successfully processed
             all_success = all(file["status"] == "success" for file in voucher_ocr_results)
+            any_failed = any(file["status"] == "failed" for file in voucher_ocr_results)
             
             # Update voucher with OCR status
             if all_success and len(voucher_ocr_results) > 0:
                 voucher_collection.update_one(
                     {"_id": ObjectId(voucher_id)},
-                    {"$set": {"OCR": "Done", "ocr_completed_at": datetime.utcnow()}}
+                    {"$set": {"OCR": "done", "ocr_completed_at": datetime.utcnow()}}
                 )
-                ocr_status = "Done"
-            elif len(voucher_ocr_results) > 0:
+                ocr_status = "done"
+            elif any_failed and not all_success and len(voucher_ocr_results) > 0:
                 voucher_collection.update_one(
                     {"_id": ObjectId(voucher_id)},
-                    {"$set": {"OCR": "Partial", "ocr_completed_at": datetime.utcnow()}}
+                    {"$set": {"OCR": "partial", "ocr_completed_at": datetime.utcnow()}}
                 )
-                ocr_status = "Partial"
+                ocr_status = "partial"
+            elif len(voucher_ocr_results) == 0:
+                voucher_collection.update_one(
+                    {"_id": ObjectId(voucher_id)},
+                    {"$set": {"OCR": "failed", "ocr_completed_at": datetime.utcnow()}}
+                )
+                ocr_status = "failed"
             else:
-                ocr_status = "No files"
+                ocr_status = "unknown"
             
             results.append({
                 "voucher_id": voucher_id,
@@ -322,11 +364,11 @@ def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: l
                 "files": voucher_ocr_results
             })
         
-        # Update job status to completed
+        # Update job status to success
         ocr_jobs_collection.update_one(
             {"_id": ObjectId(job_id)},
             {"$set": {
-                "status": "completed",
+                "status": "success",
                 "completed_at": datetime.utcnow(),
                 "results": results
             }}
@@ -419,7 +461,7 @@ async def extract_text_from_s3(
         job_doc = {
             "user_id": user_id,
             "voucher_ids": voucher_id_list,
-            "status": "pending",
+            "status": "awaiting",
             "total_vouchers": voucher_count,
             "created_at": datetime.utcnow()
         }
@@ -434,7 +476,7 @@ async def extract_text_from_s3(
             "job_id": job_id,
             "user_id": user_id,
             "total_vouchers": voucher_count,
-            "status": "pending",
+            "status": "awaiting",
             "check_status_url": f"/accounting/ocr/job/{job_id}"
         }
         
@@ -470,53 +512,6 @@ async def get_ocr_job_status(job_id: str):
             "results": job.get("results")
         }
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/ocr/{project_id}")
-async def get_ocr_results(project_id: str, user_id: str):
-    try:
-        # ✅ Step 1: Fetch project details
-        project = projects_collection.find_one(
-            {"_id": ObjectId(project_id), "user_id": user_id},
-            {"title": 1, "description": 1, "color": 1, "status": 1, "files": 1, "total_images": 1, "processed_count": 1}
-        )
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-
-        # ✅ Step 2: Extract file URLs from project
-        file_urls = []
-        if "files" in project and isinstance(project["files"], list):
-            file_urls = [f.get("file_url") for f in project["files"] if "file_url" in f]
-
-        # ✅ Step 3: Fetch OCR logs for this project
-        ocr_logs = list(ocr_collection.find(
-            {"project_id": project_id, "user_id": user_id},
-            {"_id": 1, "result_url": 1, "package_key": 1, "pdf_text": 1, "status": 1, "created_at": 1}
-        ))
-
-        results = []
-        for log in ocr_logs:
-            results.append({
-                "ocr_id": str(log["_id"]),
-                "result_url": log.get("result_url"),
-                "package_key": log.get("package_key"),
-                "status": log.get("status"),
-                "created_at": log.get("created_at"),
-                "ocr_text": log.get("pdf_text")
-            })
-
-        return {
-            "project_id": project_id,
-            "user_id": user_id,
-            "status": project.get("status", "Unknown"),
-            "total_images": project.get("total_images", 0),
-            "processed_count": project.get("processed_count", 0),
-            "file_urls": file_urls,      # ✅ All original file URLs
-            "results": results           # ✅ Includes result_url for each processed file
-        }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
