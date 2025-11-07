@@ -16,6 +16,11 @@ from pydantic import BaseModel, EmailStr
 from enum import Enum
 from fastapi import Form, File, UploadFile
 import os, json, uuid
+from fastapi.responses import RedirectResponse, JSONResponse
+from google_auth_oauthlib.flow import Flow
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+
 # -------------------- Load Environment Variables --------------------
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
@@ -28,6 +33,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "600"
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client[DB_NAME]
 users_collection = db["users"]
+oauth_states_collection = db["oauth_states"]
 org_types_collection = db["org_types"]
 
 # -------------------- Router --------------------
@@ -344,5 +350,165 @@ def dashboard(current_user: dict = Depends(get_current_user)):
         "email": current_user["email"],
         "id": str(current_user["_id"])  # Convert ObjectId to string
     }
+
+
+
+# -------------------- Google OAuth (Login/Signup) --------------------
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", os.getenv("GMAIL_CLIENT_ID"))
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", os.getenv("GMAIL_CLIENT_SECRET"))
+GOOGLE_AUTH_URI = os.getenv("GOOGLE_AUTH_URI", "https://accounts.google.com/o/oauth2/v2/auth")
+GOOGLE_TOKEN_URI = os.getenv("GOOGLE_TOKEN_URI", "https://oauth2.googleapis.com/token")
+GOOGLE_CERT_URL = os.getenv("GOOGLE_CERT_URL", "https://www.googleapis.com/oauth2/v1/certs")
+GOOGLE_REDIRECT_URI = os.getenv(
+    "GOOGLE_REDIRECT_URI",
+    "https://ai-invoice-automate-backend-njgp.onrender.com/api/auth/google/callback"
+)
+GOOGLE_SCOPES = ["openid", "email", "profile"]
+
+def _build_google_login_client_config():
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in environment")
+    return {
+        "web": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": GOOGLE_AUTH_URI,
+            "token_uri": GOOGLE_TOKEN_URI,
+            "auth_provider_x509_cert_url": GOOGLE_CERT_URL,
+            "redirect_uris": [GOOGLE_REDIRECT_URI],
+        }
+    }
+
+@router.get("/google/authorize")
+def google_authorize():
+    """
+    Start Google OAuth (OpenID Connect) for login/signup.
+    Redirects to Google's consent screen.
+    """
+    try:
+        flow = Flow.from_client_config(
+            _build_google_login_client_config(),
+            scopes=GOOGLE_SCOPES,
+            redirect_uri=GOOGLE_REDIRECT_URI
+        )
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            prompt='consent'
+        )
+        # Track state to prevent CSRF
+        oauth_states_collection.insert_one({
+            "state": state,
+            "created_at": datetime.utcnow()
+        })
+        return RedirectResponse(authorization_url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Google OAuth authorize error: {str(e)}")
+
+@router.get("/google/callback")
+def google_callback(code: str, state: str):
+    """
+    Handle Google OAuth callback, create or login user, and return app JWT.
+    """
+    try:
+        # Validate state
+        state_doc = oauth_states_collection.find_one({"state": state})
+        if not state_doc:
+            raise HTTPException(status_code=400, detail="Invalid OAuth state")
+        # Clean up state
+        oauth_states_collection.delete_one({"_id": state_doc["_id"]})
+
+        flow = Flow.from_client_config(
+            _build_google_login_client_config(),
+            scopes=GOOGLE_SCOPES,
+            redirect_uri=GOOGLE_REDIRECT_URI
+        )
+        # Exchange code
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
+        id_token_jwt = credentials.id_token
+        if not id_token_jwt:
+            raise HTTPException(status_code=400, detail="Missing id_token in OAuth response")
+
+        # Verify id_token and extract user info
+        claims = id_token.verify_oauth2_token(
+            id_token_jwt,
+            google_requests.Request(),
+            audience=GOOGLE_CLIENT_ID
+        )
+        email = claims.get("email")
+        if not email:
+            raise HTTPException(status_code=400, detail="No email in Google ID token")
+        email_lower = email.lower()
+        name = claims.get("name") or email_lower.split("@")[0]
+        sub = claims.get("sub")
+        picture = claims.get("picture")
+        email_verified = claims.get("email_verified", False)
+
+        # Upsert user
+        user = users_collection.find_one({"email": email_lower})
+        if not user:
+            new_user = {
+                "name": name,
+                "email": email_lower,
+                "password_hash": None,
+                "created_at": datetime.utcnow(),
+                "registration_flow": "google_oauth",
+                "status": True,
+                "role": "user",
+                "google": {
+                    "sub": sub,
+                    "email_verified": email_verified,
+                    "picture": picture
+                },
+                "google_credentials": {
+                    "token": credentials.token,
+                    "refresh_token": credentials.refresh_token,
+                    "token_uri": credentials.token_uri,
+                    "client_id": credentials.client_id,
+                    "client_secret": credentials.client_secret,
+                    "scopes": credentials.scopes
+                }
+            }
+            result = users_collection.insert_one(new_user)
+            user_id_str = str(result.inserted_id)
+        else:
+            # Update Google details/tokens
+            users_collection.update_one(
+                {"_id": user["_id"]},
+                {"$set": {
+                    "name": name,
+                    "google": {
+                        "sub": sub,
+                        "email_verified": email_verified,
+                        "picture": picture
+                    },
+                    "google_credentials": {
+                        "token": credentials.token,
+                        "refresh_token": credentials.refresh_token,
+                        "token_uri": credentials.token_uri,
+                        "client_id": credentials.client_id,
+                        "client_secret": credentials.client_secret,
+                        "scopes": credentials.scopes
+                    }
+                }}
+            )
+            user_id_str = str(user["_id"]) if isinstance(user["_id"], ObjectId) else user["_id"]
+
+        # Issue app JWT
+        access_token = create_access_token(
+            {"sub": user_id_str},
+            timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
+        return {
+            "message": "Google login successful",
+            "access_token": access_token,
+            "token_type": "bearer",
+            "name": name,
+            "email": email_lower,
+            "user_id": user_id_str,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Google OAuth callback error: {str(e)}")
 
 
