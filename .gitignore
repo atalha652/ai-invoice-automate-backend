@@ -9,3 +9,4 @@ venv/
 # Virtual environments
 .venv
 .env
+client_secret_*.json

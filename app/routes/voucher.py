@@ -258,6 +258,40 @@ async def get_approved_vouchers(
     }
 
 
+@router.get("/awaiting-approval")
+async def get_awaiting_approval_vouchers(
+    user_id: str = Query(..., description="User ID to fetch vouchers for")
+):
+    """
+    Get all vouchers for a specific user with status 'awaiting_approval'.
+    Example: GET /accounting/voucher/awaiting-approval?user_id=123
+    """
+    query = {
+        "user_id": user_id,
+        "status": "awaiting_approval"
+    }
+
+    vouchers = list(voucher_collection.find(query))
+
+    if not vouchers:
+        raise HTTPException(status_code=404, detail="No vouchers found with status 'awaiting_approval'")
+
+    # Convert ObjectId and datetime for readability
+    for voucher in vouchers:
+        voucher["_id"] = str(voucher["_id"])
+        if "created_at" in voucher:
+            voucher["created_at"] = voucher["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "approval_requested_at" in voucher:
+            voucher["approval_requested_at"] = voucher["approval_requested_at"].strftime("%Y-%m-%d %H:%M:%S")
+        if "updated_at" in voucher:
+            voucher["updated_at"] = voucher["updated_at"].strftime("%Y-%m-%d %H:%M:%S")
+
+    return {
+        "count": len(vouchers),
+        "vouchers": vouchers
+    }
+
+
 @router.get("/{voucher_id}")
 async def get_voucher_by_id(
     voucher_id: str,
