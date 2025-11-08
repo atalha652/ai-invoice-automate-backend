@@ -404,7 +404,6 @@ async def get_email_details(user_id: str, email_id: str):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching email details: {str(e)}")
-
 @router.get("/health")
 def health_check():
     return {"status": "ok"}
