@@ -193,18 +193,8 @@ class GmailService:
             purchase_info['amount'] = amount
             purchase_info['currency'] = currency
         
-        # Extract order number
-        order_patterns = [
-            r'Order\s*#?[:\s]*([A-Z0-9\-]+)',
-            r'Order\s*Number[:\s]*([A-Z0-9\-]+)',
-            r'Transaction\s*ID[:\s]*([A-Z0-9\-]+)',
-        ]
-        
-        for pattern in order_patterns:
-            match = re.search(pattern, text_content, re.IGNORECASE)
-            if match:
-                purchase_info['order_number'] = match.group(1)
-                break
+        # Extract order number with stricter patterns so we don't grab words like "has"
+        purchase_info['order_number'] = self._extract_order_number(text_content)
         
         # Determine merchant from sender
         sender_name = email_data.get('sender_name', '')
@@ -235,7 +225,7 @@ class GmailService:
             '¥': 'JPY',
             '₱': 'PHP',
             '₩': 'KRW',
-            '₽': 'RUB'
+            '₽': 'RUB',
         }
         
         symbol_pattern = r'(?<![\w])([{symbols}])\s*([\d,]+(?:\.\d{{1,2}})?)'.format(
@@ -247,24 +237,39 @@ class GmailService:
             amount = self._safe_float(match.group(2))
             return amount, currency_symbols.get(symbol)
         
+        # Patterns like "180 USDT", "500 PKR", "15000.0 Rs." etc.
         code_match = re.search(
-            r'([\d,]+(?:\.\d{1,2})?)\s*(USD|EUR|GBP|INR|JPY|CAD|AUD|CHF|SGD)',
+            r'([\d,]+(?:\.\d{1,2})?)\s*('
+            r'USD|USDT|EUR|GBP|INR|JPY|CAD|AUD|CHF|SGD|PKR|'
+            r'SEK|NOK|DKK|PLN|CZK|HUF|RON|HRK|BGN|ISK'
+            r')',
             text_content,
-            re.IGNORECASE
+            re.IGNORECASE,
         )
         if code_match:
             amount = self._safe_float(code_match.group(1))
             currency = code_match.group(2).upper()
             return amount, currency
         
+        # Localized patterns like "Amount PKR 500.00", "Money Transfer of Rs. 15000.0"
         labeled_match = re.search(
-            r'(?:total|amount|paid|grand\s*total)[:\s]*\$?\s*([\d,]+(?:\.\d{1,2})?)',
+            r'(?:total|amount|paid|grand\s*total|money\s*transfer\s*of)'
+            r'[:\s]*([A-Z]{0,3}\.?)?\s*([\d,]+(?:\.\d{1,2})?)',
             text_content,
-            re.IGNORECASE
+            re.IGNORECASE,
         )
         if labeled_match:
-            amount = self._safe_float(labeled_match.group(1))
-            return amount, 'USD'
+            currency_code = labeled_match.group(1)
+            amount = self._safe_float(labeled_match.group(2))
+            if currency_code:
+                currency_code = currency_code.replace('.', '').upper()
+            known_codes = {
+                'USD', 'USDT', 'EUR', 'GBP', 'INR', 'JPY', 'CAD', 'AUD', 'CHF',
+                'SGD', 'PKR', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON',
+                'HRK', 'BGN', 'ISK',
+            }
+            currency = currency_code if currency_code in known_codes else None
+            return amount, currency
         
         return None, None
 
@@ -290,6 +295,32 @@ class GmailService:
             receipt_url = invoice_url
         
         return {'invoice_url': invoice_url, 'receipt_url': receipt_url}
+
+    def _extract_order_number(self, text_content: str) -> Optional[str]:
+        """
+        Try multiple patterns to extract a realistic order / transaction number.
+        We avoid capturing generic words like 'has' by enforcing digits in the match.
+        """
+        patterns = [
+            # Foodpanda-style: "Order number: s0ty-1wut"
+            r'Order\s+number[:\s]+([A-Za-z0-9\-]{4,})',
+            # Daraz-style: "order # 162400400949236"
+            r'order\s*#\s*([0-9]{6,})',
+            # Google Play GPA: "Order number: GPA.3336-1630-7379-44204"
+            r'Order\s+number[:\s]+(GPA\.[A-Z0-9\.\-]+)',
+            # Generic transaction id
+            r'Transaction\s*ID[:\s]*([A-Za-z0-9\-\_]{6,})',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text_content, re.IGNORECASE)
+            if match:
+                candidate = match.group(1).strip()
+                # Must contain at least one digit to be considered an order number
+                if any(ch.isdigit() for ch in candidate):
+                    return candidate
+
+        return None
 
     def _safe_float(self, value: str) -> Optional[float]:
         try:
