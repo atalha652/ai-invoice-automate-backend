@@ -8,14 +8,17 @@ import json
 import base64
 import email
 from email.mime.text import MIMEText
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
 import re
 
 # Gmail API scopes
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
-    'https://www.googleapis.com/auth/gmail.modify'
+    'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile',
+    'openid'
 ]
 
 class GmailService:
@@ -23,7 +26,8 @@ class GmailService:
         self.creds = None
         self.service = None
         if user_credentials:
-            self.creds = Credentials.from_authorized_user_info(user_credentials, SCOPES)
+            scopes = user_credentials.get('scopes') or SCOPES
+            self.creds = Credentials.from_authorized_user_info(user_credentials, scopes)
 
     def authenticate(self) -> bool:
         """Authenticate with Gmail API using user credentials"""
@@ -136,24 +140,38 @@ class GmailService:
             return None
     
     def _extract_body(self, payload: Dict) -> str:
-        """Extract email body content"""
-        body = ""
+        """Extract email body content, preferring HTML over plain text"""
+        collected = {'text/html': [], 'text/plain': []}
         
-        if 'parts' in payload:
-            for part in payload['parts']:
-                if part['mimeType'] == 'text/plain':
-                    data = part['body']['data']
-                    body = base64.urlsafe_b64decode(data).decode('utf-8')
-                    break
-                elif part['mimeType'] == 'text/html':
-                    data = part['body']['data']
-                    body = base64.urlsafe_b64decode(data).decode('utf-8')
-        else:
-            if payload['mimeType'] == 'text/plain':
-                data = payload['body']['data']
-                body = base64.urlsafe_b64decode(data).decode('utf-8')
+        def _walk_parts(part: Dict):
+            mime_type = part.get('mimeType', '')
+            body = part.get('body', {})
+            data = body.get('data')
+            
+            if data and mime_type in collected:
+                decoded = self._decode_body_data(data)
+                if decoded:
+                    collected[mime_type].append(decoded)
+            
+            for sub_part in part.get('parts', []):
+                _walk_parts(sub_part)
         
-        return body
+        _walk_parts(payload)
+        
+        if collected['text/html']:
+            return collected['text/html'][0]
+        if collected['text/plain']:
+            return collected['text/plain'][0]
+        return ""
+
+    def _decode_body_data(self, data: str) -> str:
+        try:
+            missing_padding = len(data) % 4
+            if missing_padding:
+                data += '=' * (4 - missing_padding)
+            return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+        except Exception:
+            return ""
     
     def _extract_purchase_info(self, email_data: Dict) -> Dict:
         """Extract purchase-related information from email"""
@@ -162,25 +180,18 @@ class GmailService:
             'currency': None,
             'order_number': None,
             'merchant': None,
-            'purchase_type': 'unknown'
+            'purchase_type': 'unknown',
+            'invoice_url': None,
+            'receipt_url': None
         }
         
-        text_content = f"{email_data.get('subject', '')} {email_data.get('body', '')}"
+        body_text = self._strip_html(email_data.get('body', ''))
+        text_content = f"{email_data.get('subject', '')} {body_text}"
         
-        # Extract amount and currency
-        amount_patterns = [
-            r'\$(\d+(?:\.\d{2})?)',  # $123.45
-            r'(\d+(?:\.\d{2})?)\s*USD',  # 123.45 USD
-            r'Total[:\s]*\$?(\d+(?:\.\d{2})?)',  # Total: $123.45
-            r'Amount[:\s]*\$?(\d+(?:\.\d{2})?)',  # Amount: $123.45
-        ]
-        
-        for pattern in amount_patterns:
-            match = re.search(pattern, text_content, re.IGNORECASE)
-            if match:
-                purchase_info['amount'] = float(match.group(1))
-                purchase_info['currency'] = 'USD'
-                break
+        amount, currency = self._extract_amount_and_currency(text_content)
+        if amount is not None:
+            purchase_info['amount'] = amount
+            purchase_info['currency'] = currency
         
         # Extract order number
         order_patterns = [
@@ -209,7 +220,87 @@ class GmailService:
         elif any(word in subject for word in ['refund', 'return']):
             purchase_info['purchase_type'] = 'refund'
         
+        document_links = self._extract_document_links(email_data.get('body', ''))
+        purchase_info.update(document_links)
+        
         return purchase_info
+
+    def _extract_amount_and_currency(self, text_content: str) -> Tuple[Optional[float], Optional[str]]:
+        """Extract amount and currency from text content"""
+        currency_symbols = {
+            '$': 'USD',
+            '€': 'EUR',
+            '£': 'GBP',
+            '₹': 'INR',
+            '¥': 'JPY',
+            '₱': 'PHP',
+            '₩': 'KRW',
+            '₽': 'RUB'
+        }
+        
+        symbol_pattern = r'(?<![\w])([{symbols}])\s*([\d,]+(?:\.\d{{1,2}})?)'.format(
+            symbols=re.escape(''.join(currency_symbols.keys()))
+        )
+        match = re.search(symbol_pattern, text_content)
+        if match:
+            symbol = match.group(1)
+            amount = self._safe_float(match.group(2))
+            return amount, currency_symbols.get(symbol)
+        
+        code_match = re.search(
+            r'([\d,]+(?:\.\d{1,2})?)\s*(USD|EUR|GBP|INR|JPY|CAD|AUD|CHF|SGD)',
+            text_content,
+            re.IGNORECASE
+        )
+        if code_match:
+            amount = self._safe_float(code_match.group(1))
+            currency = code_match.group(2).upper()
+            return amount, currency
+        
+        labeled_match = re.search(
+            r'(?:total|amount|paid|grand\s*total)[:\s]*\$?\s*([\d,]+(?:\.\d{1,2})?)',
+            text_content,
+            re.IGNORECASE
+        )
+        if labeled_match:
+            amount = self._safe_float(labeled_match.group(1))
+            return amount, 'USD'
+        
+        return None, None
+
+    def _extract_document_links(self, text: str) -> Dict[str, Optional[str]]:
+        """Find invoice or receipt links inside the email body"""
+        if not text:
+            return {'invoice_url': None, 'receipt_url': None}
+        
+        urls = re.findall(r'(https?://[^\s"<>]+)', text)
+        invoice_url = None
+        receipt_url = None
+        invoice_keywords = ['invoice', 'bill', 'statement']
+        receipt_keywords = ['receipt', 'order', 'purchase', 'download']
+        
+        for url in urls:
+            lowercase_url = url.lower()
+            if not invoice_url and any(keyword in lowercase_url for keyword in invoice_keywords):
+                invoice_url = url
+            if not receipt_url and any(keyword in lowercase_url for keyword in receipt_keywords):
+                receipt_url = url
+        
+        if not receipt_url:
+            receipt_url = invoice_url
+        
+        return {'invoice_url': invoice_url, 'receipt_url': receipt_url}
+
+    def _safe_float(self, value: str) -> Optional[float]:
+        try:
+            return float(value.replace(',', ''))
+        except Exception:
+            return None
+
+    def _strip_html(self, text: str) -> str:
+        if not text:
+            return ''
+        return re.sub(r'<[^>]+>', ' ', text)
     
     def _extract_name_from_email(self, email_string: str) -> str:
         """Extract name from email string like 'John Doe <john@example.com>'"""
