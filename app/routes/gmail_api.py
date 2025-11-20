@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, RedirectResponse
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
@@ -15,7 +15,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv()
 
 from services.gmail_service import GmailService
-from routes.auth import get_current_user
 
 # Mount under "/api" in main; this keeps routes at "/api/gmail"
 router = APIRouter(prefix="/gmail", tags=["Gmail"])
@@ -35,6 +34,8 @@ class EmailResponse(BaseModel):
     order_number: Optional[str] = None
     merchant: Optional[str] = None
     purchase_type: str = "unknown"
+    invoice_url: Optional[str] = None
+    receipt_url: Optional[str] = None
     internal_date: str
     size_estimate: int
 
@@ -63,9 +64,6 @@ class EmailFilter(BaseModel):
     merchant: Optional[str] = None
     purchase_type: Optional[str] = None
 
-# Global Gmail service instance
-gmail_service = GmailService()
-
 # --- Database Connection ---
 db_client = MongoClient(os.getenv("MONGO_URI"))
 db = db_client[os.getenv("DB_NAME")]
@@ -76,6 +74,7 @@ SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
     'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile',
     'openid'
 ]
 # Allow overriding via env var to match your running port/domain
@@ -103,12 +102,21 @@ def _build_google_client_config():
     }
 
 @router.get("/auth", response_model=AuthResponse)
-async def authenticate_gmail():
+async def authenticate_gmail(user_id: str = Query(..., description="User ID to test Gmail authentication for")):
     """
     Authenticate with Gmail API
     Returns authentication status and auth URL if needed
     """
     try:
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        if not user or not user.get("gmail_credentials"):
+            return AuthResponse(
+                success=False,
+                message="Gmail not authorized for this user. Please start OAuth flow.",
+                auth_url=f"/api/gmail/oauth2/authorize/?user_id={user_id}"
+            )
+        
+        gmail_service = GmailService(user_credentials=user["gmail_credentials"])
         success = gmail_service.authenticate()
         
         if success:
@@ -134,9 +142,10 @@ async def oauth2_authorize(user_id: str):
     Redirects user to Google's consent screen.
     """
     try:
+        requested_scopes = list(SCOPES)
         flow = Flow.from_client_config(
             _build_google_client_config(),
-            scopes=SCOPES,
+            scopes=requested_scopes,
             redirect_uri=REDIRECT_URI
         )
 
@@ -149,7 +158,10 @@ async def oauth2_authorize(user_id: str):
         # Store state in user's session or database to prevent CSRF
         users_collection.update_one(
             {"_id": ObjectId(user_id)},
-            {"$set": {"oauth_state": state}}
+            {"$set": {
+                "oauth_state": state,
+                "oauth_requested_scopes": requested_scopes
+            }}
         )
         
         return RedirectResponse(authorization_url)
@@ -170,9 +182,10 @@ async def oauth2_callback(code: str, state: str):
         if not user:
             raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
+        requested_scopes = user.get("oauth_requested_scopes") or list(SCOPES)
         flow = Flow.from_client_config(
             _build_google_client_config(),
-            scopes=SCOPES,
+            scopes=requested_scopes,
             redirect_uri=REDIRECT_URI
         )
 
@@ -192,7 +205,8 @@ async def oauth2_callback(code: str, state: str):
                     "client_secret": credentials.client_secret,
                     "scopes": credentials.scopes
                 },
-                "oauth_state": None  # Clear state after use
+                "oauth_state": None,  # Clear state after use
+                "oauth_requested_scopes": None
             }}
         )
 
