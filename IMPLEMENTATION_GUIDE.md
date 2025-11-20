@@ -143,18 +143,22 @@ async def get_bank_account(
 async def import_bank_statement(
     file: UploadFile = File(...),
     bank_account_id: str = Form(...),
-    format: BankStatementFormat = Form(...),
+    format: Optional[BankStatementFormat] = Form(None),
     current_user: dict = Depends(get_current_user),
     bank_repo: BankRepository = Depends(get_bank_repo),
     accounting_repo = Depends(get_accounting_repo),
 ):
     """
-    Import bank statement file (CSV, CAMT.053, or MT940)
+    Import bank statement file (CSV, CAMT.053, MT940, or PDF)
 
     Formats supported:
     - csv: Standard CSV format
     - camt053: ISO 20022 XML format
     - mt940: SWIFT MT940 format
+    - pdf: Bank statement PDFs with tabular transaction layouts
+
+    Format selection is optional; the backend auto-detects the correct parser
+    when the field is omitted or incorrect.
     """
     try:
         # Verify bank account ownership

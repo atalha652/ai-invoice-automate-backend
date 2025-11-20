@@ -29,6 +29,7 @@ class BankStatementFormat(str, Enum):
     CSV = "csv"
     CAMT053 = "camt053"  # ISO 20022 XML format
     MT940 = "mt940"  # SWIFT MT940 format
+    PDF = "pdf"  # PDF bank statements
 
 
 class TransactionType(str, Enum):
@@ -192,7 +193,7 @@ class BankStatement(BaseModel):
 class BankStatementUpload(BaseModel):
     """Upload bank statement request"""
     bank_account_id: str
-    format: BankStatementFormat
+    format: Optional[BankStatementFormat] = None
     from_date: Optional[datetime] = None
     to_date: Optional[datetime] = None
 
