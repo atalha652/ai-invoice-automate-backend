@@ -458,6 +458,8 @@ async def convert_transactions_to_ledger(
                             "account_id": str(account["_id"]),
                             "account_code": entry["account_code"],
                             "account_name": account["account_name"],
+                            "journal_id": journal_id,
+                            "journal_code": "BANK",
                             "entry_type": entry["entry_type"],
                             "amount": entry["amount"],
                             "running_balance": running_balance,
