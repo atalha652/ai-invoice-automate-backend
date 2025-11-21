@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from typing import List, Optional
 from datetime import datetime
 from pymongo import MongoClient
+from bson import ObjectId
 import os
 import certifi
 from dotenv import load_dotenv
@@ -18,6 +19,7 @@ from app.models.bank_transactions import (
     TransactionFilter,
     BankStatementFormat,
     BankTransactionUpdate,
+    TransactionsToLedgerRequest,
 )
 from app.repos.bank_repo import BankRepository
 from app.repos.accounting_repo import AccountingRepository
@@ -223,6 +225,291 @@ async def list_transactions(
 
     transactions = bank_repo.query_transactions(filters, skip, limit)
     return [t.dict(by_alias=True) for t in transactions]
+
+
+# ===== Convert Transactions to Ledger (must come before parameterized routes) =====
+
+@router.post("/bank/transactions/to-ledger", response_model=dict, status_code=200)
+async def convert_transactions_to_ledger(
+    request: TransactionsToLedgerRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Convert bank transactions to ledger entries
+
+    This creates journal entries and posts them to the ledger, similar to voucher OCR processing.
+    Each bank transaction becomes a double-entry journal entry.
+
+    Request body:
+    {
+        "transaction_ids": ["id1", "id2", ...]
+    }
+    """
+    try:
+        bank_repo = BankRepository(db)
+        accounting_repo = AccountingRepository()
+        user_id = str(current_user["_id"]) if not isinstance(current_user["_id"], str) else current_user["_id"]
+        organization_id = current_user.get("organization_id") or current_user["_id"]
+        organization_id = str(organization_id) if not isinstance(organization_id, str) else organization_id
+
+        transaction_ids = request.transaction_ids
+
+        if not transaction_ids:
+            raise HTTPException(status_code=400, detail="No transaction IDs provided")
+
+        results = {
+            "total_transactions": len(transaction_ids),
+            "successful": 0,
+            "failed": 0,
+            "ledger_entries_created": [],
+            "errors": []
+        }
+
+        for trans_id in transaction_ids:
+            try:
+                # Get transaction
+                transaction = bank_repo.get_transaction(trans_id)
+
+                if not transaction:
+                    results["errors"].append({
+                        "transaction_id": trans_id,
+                        "error": "Transaction not found"
+                    })
+                    results["failed"] += 1
+                    continue
+
+                # Verify ownership
+                if transaction.organization_id != organization_id:
+                    results["errors"].append({
+                        "transaction_id": trans_id,
+                        "error": "Access denied"
+                    })
+                    results["failed"] += 1
+                    continue
+
+                # Skip if already has ledger entry
+                if transaction.ledger_entry_id:
+                    results["errors"].append({
+                        "transaction_id": trans_id,
+                        "error": "Already has ledger entry"
+                    })
+                    results["failed"] += 1
+                    continue
+
+                # Create journal entries for this transaction
+                from app.models.accounting import JournalEntryCreate, JournalEntryType
+
+                # Get or create "Bank" journal
+                bank_journal = accounting_repo.db["journals"].find_one({
+                    "organization_id": organization_id,
+                    "journal_type": "bank"
+                })
+
+                if not bank_journal:
+                    # Create default bank journal
+                    bank_journal_data = {
+                        "organization_id": organization_id,
+                        "journal_code": "BANK",
+                        "journal_name": "Bank Transactions",
+                        "journal_type": "bank",
+                        "description": "Bank account transactions",
+                        "is_active": True,
+                        "created_at": datetime.utcnow()
+                    }
+                    result = accounting_repo.db["journals"].insert_one(bank_journal_data)
+                    bank_journal = accounting_repo.db["journals"].find_one({"_id": result.inserted_id})
+
+                journal_id = str(bank_journal["_id"])
+
+                # Determine accounts based on transaction type
+                # For credit (money in): Debit Bank Account, Credit Income/Revenue
+                # For debit (money out): Debit Expense, Credit Bank Account
+
+                # Get bank account from chart of accounts
+                bank_account_obj = bank_repo.get_bank_account(transaction.bank_account_id)
+                bank_account_code = None
+
+                if bank_account_obj:
+                    # Try to find matching account in chart of accounts by account number/IBAN
+                    chart_account = accounting_repo.db["accounts"].find_one({
+                        "organization_id": organization_id,
+                        "$or": [
+                            {"account_code": {"$regex": bank_account_obj.account_number, "$options": "i"}},
+                            {"account_name": {"$regex": bank_account_obj.account_name, "$options": "i"}}
+                        ]
+                    })
+
+                    if chart_account:
+                        bank_account_code = chart_account["account_code"]
+                    else:
+                        # Create a new bank account in chart of accounts
+                        bank_account_code = f"1020-{bank_account_obj.account_number[-4:]}"  # 1020 = Bank accounts
+
+                        new_account = {
+                            "organization_id": organization_id,
+                            "account_code": bank_account_code,
+                            "account_name": f"Bank - {bank_account_obj.account_name}",
+                            "account_type": "ASSET",
+                            "account_subtype": "CURRENT_ASSET",
+                            "is_active": True,
+                            "current_balance": 0.0,
+                            "currency": transaction.currency,
+                            "created_at": datetime.utcnow()
+                        }
+                        accounting_repo.db["accounts"].insert_one(new_account)
+
+                # Prepare journal entry data
+                if transaction.transaction_type == "credit":
+                    # Money coming in - Debit Bank, Credit Revenue
+                    # Use counterparty name or default description
+                    description = transaction.description or f"Bank transfer from {transaction.counterparty_name or 'Unknown'}"
+
+                    # Default revenue account
+                    revenue_account_code = "4000"  # Revenue account
+
+                    entries = [
+                        {
+                            "account_code": bank_account_code,
+                            "entry_type": "DEBIT",
+                            "amount": transaction.amount,
+                            "description": description,
+                            "reference": transaction.reference or transaction.transaction_id
+                        },
+                        {
+                            "account_code": revenue_account_code,
+                            "entry_type": "CREDIT",
+                            "amount": transaction.amount,
+                            "description": description,
+                            "reference": transaction.reference or transaction.transaction_id
+                        }
+                    ]
+                else:
+                    # Money going out - Debit Expense, Credit Bank
+                    description = transaction.description or f"Bank transfer to {transaction.counterparty_name or 'Unknown'}"
+
+                    # Default expense account
+                    expense_account_code = "5000"  # Expense account
+
+                    entries = [
+                        {
+                            "account_code": expense_account_code,
+                            "entry_type": "DEBIT",
+                            "amount": transaction.amount,
+                            "description": description,
+                            "reference": transaction.reference or transaction.transaction_id
+                        },
+                        {
+                            "account_code": bank_account_code,
+                            "entry_type": "CREDIT",
+                            "amount": transaction.amount,
+                            "description": description,
+                            "reference": transaction.reference or transaction.transaction_id
+                        }
+                    ]
+
+                # Create journal entry record
+                journal_entry_doc = {
+                    "organization_id": organization_id,
+                    "journal_id": journal_id,
+                    "transaction_date": transaction.transaction_date,
+                    "description": description,
+                    "reference": transaction.reference or f"BANK-{trans_id[:8]}",
+                    "entries": entries,
+                    "total_debit": transaction.amount,
+                    "total_credit": transaction.amount,
+                    "status": "posted",
+                    "created_by": user_id,
+                    "created_at": datetime.utcnow(),
+                    "posted_at": datetime.utcnow(),
+                    "posted_by": user_id,
+                    "source": "bank_import",
+                    "source_id": trans_id
+                }
+
+                # Insert journal entry
+                je_result = accounting_repo.db["journal_entries"].insert_one(journal_entry_doc)
+                journal_entry_id = str(je_result.inserted_id)
+
+                # Create ledger entries
+                for entry in entries:
+                    # Get account details
+                    account = accounting_repo.db["accounts"].find_one({
+                        "organization_id": organization_id,
+                        "account_code": entry["account_code"]
+                    })
+
+                    if account:
+                        # Calculate running balance
+                        last_ledger = accounting_repo.db["ledger_entries"].find_one(
+                            {"account_id": str(account["_id"])},
+                            sort=[("created_at", -1)]
+                        )
+
+                        running_balance = last_ledger["running_balance"] if last_ledger else account.get("current_balance", 0.0)
+
+                        if entry["entry_type"] == "DEBIT":
+                            running_balance += entry["amount"]
+                        else:
+                            running_balance -= entry["amount"]
+
+                        # Create ledger entry
+                        ledger_entry = {
+                            "organization_id": organization_id,
+                            "account_id": str(account["_id"]),
+                            "account_code": entry["account_code"],
+                            "account_name": account["account_name"],
+                            "entry_type": entry["entry_type"],
+                            "amount": entry["amount"],
+                            "running_balance": running_balance,
+                            "transaction_date": transaction.transaction_date,
+                            "description": entry["description"],
+                            "reference": entry["reference"],
+                            "journal_entry_id": journal_entry_id,
+                            "posted_at": datetime.utcnow(),
+                            "posted_by": user_id,
+                            "created_at": datetime.utcnow()
+                        }
+
+                        accounting_repo.db["ledger_entries"].insert_one(ledger_entry)
+
+                        # Update account balance
+                        accounting_repo.db["accounts"].update_one(
+                            {"_id": account["_id"]},
+                            {"$set": {"current_balance": running_balance}}
+                        )
+
+                # Update transaction with ledger entry reference
+                bank_repo.db["bank_transactions"].update_one(
+                    {"_id": ObjectId(trans_id)},
+                    {"$set": {
+                        "ledger_entry_id": journal_entry_id,
+                        "status": "reconciled",
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+
+                results["successful"] += 1
+                results["ledger_entries_created"].append({
+                    "transaction_id": trans_id,
+                    "journal_entry_id": journal_entry_id,
+                    "amount": transaction.amount,
+                    "type": transaction.transaction_type
+                })
+
+            except Exception as e:
+                results["errors"].append({
+                    "transaction_id": trans_id,
+                    "error": str(e)
+                })
+                results["failed"] += 1
+
+        return {
+            "message": "Transaction processing completed",
+            "results": results
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error converting transactions to ledger: {str(e)}")
 
 
 @router.get("/bank/transactions/{transaction_id}", response_model=dict)

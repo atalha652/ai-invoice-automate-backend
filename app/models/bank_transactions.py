@@ -293,3 +293,8 @@ class BankTransactionUpdate(BaseModel):
     matched_voucher_id: Optional[str] = None
     description: Optional[str] = None
     notes: Optional[str] = None
+
+
+class TransactionsToLedgerRequest(BaseModel):
+    """Request to convert bank transactions to ledger entries"""
+    transaction_ids: List[str] = Field(..., min_items=1, description="List of transaction IDs to convert to ledger entries")
