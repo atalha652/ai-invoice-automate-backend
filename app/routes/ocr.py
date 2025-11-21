@@ -109,7 +109,7 @@ def send_to_llm(text: str) -> str:
 You are a professional invoice extraction assistant familiar with **Spanish VAT rules**.
 
 Your task:
-Extract structured invoice data from the given invoice text and compute VAT correctly.
+Extract structured invoice data from the given text (which may be from an invoice, receipt, or email transaction) and compute VAT correctly.
 
 📌 Spanish VAT Rules:
 - Apply **21%** for general goods and services (default).
@@ -120,11 +120,12 @@ Extract structured invoice data from the given invoice text and compute VAT corr
 
 📐 Rules for Calculations:
 - Always calculate:
-  - total = sum of all item subtotals
+  - total = sum of all item subtotals (or use provided amount if available)
   - VAT_rate = numeric value (e.g., 21.0)
   - VAT_amount = round(total * VAT_rate / 100, 2)
   - Total_with_Tax = round(total + VAT_amount, 2)
 - If VAT_rate = 0, VAT_amount must be 0 and Total_with_Tax = total.
+- If amount is null or not provided, use 0.0
 
 💳 Transaction Type Rules:
 - Analyze the document to determine if it represents money coming in (credit) or going out (debit)
@@ -132,13 +133,23 @@ Extract structured invoice data from the given invoice text and compute VAT corr
   * Invoices/bills you need to pay (supplier invoices, purchase orders)
   * Expenses, purchases, payments made
   * Money going OUT of your account
+  * Email receipts from merchants (Daraz, Amazon, etc.)
 - Use "credit" for:
   * Invoices you send to customers (sales invoices)
   * Income, revenue, payments received
   * Money coming IN to your account
-- Look for keywords like "Invoice To", "Bill To", "Receipt", "Payment", "Purchase", "Sale"
+- Look for keywords like "Invoice To", "Bill To", "Receipt", "Payment", "Purchase", "Sale", "Order"
 
-🧾 Output format (as valid JSON, no extra text):
+📧 Email Transaction Handling:
+- If this is an email transaction (contains sender, subject, merchant info):
+  * Use merchant name as supplier business_name
+  * Use sender email as supplier Email
+  * Extract order number as invoice_number if available
+  * Use email date as invoice_date
+  * Create a descriptive item based on subject/snippet
+  * If amount is provided, use it; otherwise estimate or use 0.0
+
+🧾 Output format (as valid JSON, no extra text, no comments):
 {{
   "transaction_type": "debit",
   "supplier": {{
@@ -160,17 +171,17 @@ Extract structured invoice data from the given invoice text and compute VAT corr
     "amount_in_words": "..."
   }},
   "items": [
-    {{"description": "...", "qty": 0, "unit_price": 0.0, "subtotal": 0.0}}
+    {{"description": "...", "qty": 1, "unit_price": 0.0, "subtotal": 0.0}}
   ],
   "totals": {{
     "total": 0.0,
-    "VAT_rate": 0.0,
+    "VAT_rate": 21.0,
     "VAT_amount": 0.0,
     "Total_with_Tax": 0.0
   }}
 }}
 
-📄 Invoice text:
+📄 Document text:
 {text}
 """
 
@@ -184,31 +195,91 @@ Extract structured invoice data from the given invoice text and compute VAT corr
 
 # ---------------- LLM HTML GENERATION ---------------- #
 def clean_json_string(json_text: str) -> str:
+    """Clean and extract JSON from LLM response"""
     # Remove inline comments starting with //
     json_text = re.sub(r'//.*', '', json_text)
+    # Remove block comments /* */
+    json_text = re.sub(r'/\*.*?\*/', '', json_text, flags=re.DOTALL)
     # Remove ```json or ``` markers
     json_text = re.sub(r'```(?:json)?', '', json_text)
-    # Keep only the part from the first { to the last }
+    # Remove any leading/trailing text before/after JSON
+    json_text = json_text.strip()
+    
+    # Try to find JSON object
     match = re.search(r'\{.*\}', json_text, re.DOTALL)
     if match:
         json_text = match.group(0)
     else:
-        raise ValueError("No valid JSON object found in text")
+        # Try to find JSON array
+        match = re.search(r'\[.*\]', json_text, re.DOTALL)
+        if match:
+            json_text = match.group(0)
+        else:
+            raise ValueError("No valid JSON object found in text")
+    
     return json_text.strip()
 
-def OCR(image_bytes: bytes) -> str:
+def OCR(image_bytes: bytes, mime_type: str = 'image/jpeg') -> str:
     client = genai.Client(api_key=os.getenv("GENAI_API_KEY"))
     response = client.models.generate_content(
         model='gemini-2.0-flash-lite',
         contents=[
             types.Part.from_bytes(
                 data=image_bytes,
-                mime_type='image/jpeg',
+                mime_type=mime_type,
             ),
             'Extract all text from this image.'
         ]
     )
     return response.text
+
+def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    """Extract text from PDF file using PyPDF2 or similar library"""
+    try:
+        import PyPDF2
+        pdf_file = io.BytesIO(pdf_bytes)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        return text
+    except ImportError:
+        # Fallback: Convert PDF to images and use OCR
+        try:
+            from pdf2image import convert_from_bytes
+            images = convert_from_bytes(pdf_bytes)
+            text = ""
+            for img in images:
+                img_bytes = io.BytesIO()
+                img.save(img_bytes, format='JPEG')
+                img_bytes.seek(0)
+                text += OCR(img_bytes.getvalue(), mime_type='image/jpeg') + "\n"
+            return text
+        except Exception as e:
+            raise ValueError(f"Could not extract text from PDF: {str(e)}")
+
+def convert_toon_to_readable(toon_string: str) -> str:
+    """
+    Convert TOON format (key:value|key:value) to readable text for LLM processing.
+    """
+    try:
+        # Split by pipe to get key:value pairs
+        pairs = toon_string.split("|")
+        readable_lines = []
+        
+        for pair in pairs:
+            if ":" in pair:
+                # Handle escaped pipes
+                key, value = pair.split(":", 1)
+                # Unescape pipes in value
+                value = value.replace("\\|", "|")
+                # Format as readable text
+                readable_lines.append(f"{key}: {value}")
+        
+        return "\n".join(readable_lines)
+    except Exception as e:
+        # If conversion fails, return original
+        return toon_string
 
 def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: list):
     """Background task to process vouchers"""
@@ -243,93 +314,179 @@ def process_vouchers_background(job_id: str, user_id: str, voucher_object_ids: l
             # Process each file in the voucher
             if isinstance(files, list):
                 for file_obj in files:
-                    if isinstance(file_obj, dict) and "file_url" in file_obj:
-                        file_url = file_obj["file_url"]
-                        
-                        s3_key = "unknown"
-                        try:
-                            # Extract S3 key from URL
-                            url_without_params = file_url.split("?")[0]
-                            
-                            if ".s3." in url_without_params and ".amazonaws.com/" in url_without_params:
-                                s3_key = url_without_params.split(".amazonaws.com/")[1]
-                            elif f"{bucket_name}/" in url_without_params:
-                                s3_key = url_without_params.split(f"{bucket_name}/")[1]
-                            else:
-                                raise ValueError(f"Could not parse S3 key from URL: {file_url}")
-                            
-                            # URL decode the S3 key
-                            s3_key = unquote(s3_key)
-                            
-                            # Download file from S3
-                            file_stream = io.BytesIO()
-                            s3.download_fileobj(bucket_name, s3_key, file_stream)
-                            file_stream.seek(0)
-                            file_bytes = file_stream.getvalue()
-                            
-                            # Detect file type and process accordingly
-                            raw_text = ""
-                            file_extension = s3_key.lower().split('.')[-1]
-                            
-                            if file_extension == 'pdf':
-                                # Handle PDF files
-                                raw_text = extract_text_from_pdf(file_bytes)
-                            elif file_extension in ['txt', 'text']:
-                                # Handle text files
-                                raw_text = file_bytes.decode('utf-8', errors='ignore')
-                            elif file_extension in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff']:
-                                # Handle image files
-                                mime_type = 'image/jpeg' if file_extension in ['jpg', 'jpeg'] else f'image/{file_extension}'
-                                raw_text = OCR(file_bytes, mime_type=mime_type)
-                            else:
-                                raise ValueError(f"Unsupported file type: {file_extension}")
-                            
-                            cleaned_text = clean_ocr_text(raw_text)
-                            
-                            # Pass cleaned text to LLM for invoice extraction
-                            llm_response = None
-                            invoice_data = None
-                            ledger_id = None
-                            llm_error_msg = None
-                            
+                    if isinstance(file_obj, dict):
+                        # Check if this is TOON data or file URL
+                        if "toon_data" in file_obj:
+                            # Handle TOON data - convert to readable format
                             try:
-                                llm_raw = send_to_llm(cleaned_text)
-                                llm_cleaned = clean_json_string(llm_raw)
-                                invoice_data = json.loads(llm_cleaned)
-                                llm_response = invoice_data
-                            except Exception as llm_error:
-                                llm_error_msg = str(llm_error)
-                                llm_response = {"error": llm_error_msg}
+                                toon_data = file_obj["toon_data"]
+                                file_name = file_obj.get("name", "unknown.toon")
+                                original_email = file_obj.get("original_email", {})
+                                
+                                # Convert TOON to readable format for LLM
+                                readable_text = convert_toon_to_readable(toon_data)
+                                
+                                # Enhance with original email data if available
+                                if original_email:
+                                    enhanced_text = f"""
+Email Transaction Details:
+========================
+
+Sender: {original_email.get('sender_name', 'Unknown')} ({original_email.get('sender_email', 'N/A')})
+Subject: {original_email.get('subject', 'N/A')}
+Date: {original_email.get('date', 'N/A')}
+Merchant: {original_email.get('merchant', 'N/A')}
+Purchase Type: {original_email.get('purchase_type', 'unknown')}
+Amount: {original_email.get('amount', 'N/A')} {original_email.get('currency', '')}
+Order Number: {original_email.get('order_number', 'N/A')}
+
+Email Content:
+{original_email.get('snippet', 'N/A')}
+
+Full Email Data:
+{readable_text}
+"""
+                                    cleaned_text = enhanced_text
+                                else:
+                                    cleaned_text = readable_text
+                                
+                                # Pass formatted text to LLM for invoice extraction
+                                llm_response = None
+                                invoice_data = None
+                                ledger_id = None
+                                llm_error_msg = None
+                                
+                                try:
+                                    llm_raw = send_to_llm(cleaned_text)
+                                    llm_cleaned = clean_json_string(llm_raw)
+                                    invoice_data = json.loads(llm_cleaned)
+                                    llm_response = invoice_data
+                                except Exception as llm_error:
+                                    llm_error_msg = str(llm_error)
+                                    llm_response = {"error": llm_error_msg}
+                                
+                                # Store in ledger collection
+                                ledger_entry = {
+                                    "user_id": user_id,
+                                    "voucher_id": voucher_id,
+                                    "file_name": file_name,
+                                    "data_type": "toon",
+                                    "toon_data": toon_data,
+                                    "ocr_text": cleaned_text,
+                                    "invoice_data": invoice_data if invoice_data else None,
+                                    "llm_error": llm_error_msg,
+                                    "processing_status": "success" if invoice_data else "llm_failed",
+                                    "created_at": datetime.utcnow()
+                                }
+                                ledger_result = ledger_collection.insert_one(ledger_entry)
+                                ledger_id = str(ledger_result.inserted_id)
+                                
+                                voucher_ocr_results.append({
+                                    "file_name": file_name,
+                                    "data_type": "toon",
+                                    "ledger_id": ledger_id,
+                                    "status": "success"
+                                })
+                                
+                            except Exception as e:
+                                voucher_ocr_results.append({
+                                    "file_name": file_obj.get("name", "unknown.toon"),
+                                    "data_type": "toon",
+                                    "status": "failed",
+                                    "error": str(e)
+                                })
+                        
+                        elif "file_url" in file_obj:
+                            # Handle regular file URL
+                            file_url = file_obj["file_url"]
                             
-                            # Store in ledger collection
-                            ledger_entry = {
-                                "user_id": user_id,
-                                "voucher_id": voucher_id,
-                                "file_url": file_url,
-                                "s3_key": s3_key,
-                                "ocr_text": cleaned_text,
-                                "invoice_data": invoice_data if invoice_data else None,
-                                "llm_error": llm_error_msg,
-                                "processing_status": "success" if invoice_data else "llm_failed",
-                                "created_at": datetime.utcnow()
-                            }
-                            ledger_result = ledger_collection.insert_one(ledger_entry)
-                            ledger_id = str(ledger_result.inserted_id)
-                            
-                            voucher_ocr_results.append({
-                                "file_url": file_url,
-                                "s3_key": s3_key,
-                                "ledger_id": ledger_id,
-                                "status": "success"
-                            })
-                            
-                        except Exception as e:
-                            voucher_ocr_results.append({
-                                "file_url": file_url,
-                                "s3_key": s3_key,
-                                "status": "failed",
-                                "error": str(e)
-                            })
+                            s3_key = "unknown"
+                            try:
+                                # Extract S3 key from URL
+                                url_without_params = file_url.split("?")[0]
+                                
+                                if ".s3." in url_without_params and ".amazonaws.com/" in url_without_params:
+                                    s3_key = url_without_params.split(".amazonaws.com/")[1]
+                                elif f"{bucket_name}/" in url_without_params:
+                                    s3_key = url_without_params.split(f"{bucket_name}/")[1]
+                                else:
+                                    raise ValueError(f"Could not parse S3 key from URL: {file_url}")
+                                
+                                # URL decode the S3 key
+                                s3_key = unquote(s3_key)
+                                
+                                # Download file from S3
+                                file_stream = io.BytesIO()
+                                s3.download_fileobj(bucket_name, s3_key, file_stream)
+                                file_stream.seek(0)
+                                file_bytes = file_stream.getvalue()
+                                
+                                # Detect file type and process accordingly
+                                raw_text = ""
+                                file_extension = s3_key.lower().split('.')[-1]
+                                
+                                if file_extension == 'pdf':
+                                    # Handle PDF files
+                                    raw_text = extract_text_from_pdf(file_bytes)
+                                elif file_extension in ['txt', 'text']:
+                                    # Handle text files
+                                    raw_text = file_bytes.decode('utf-8', errors='ignore')
+                                elif file_extension in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff']:
+                                    # Handle image files
+                                    mime_type = 'image/jpeg' if file_extension in ['jpg', 'jpeg'] else f'image/{file_extension}'
+                                    raw_text = OCR(file_bytes, mime_type=mime_type)
+                                else:
+                                    raise ValueError(f"Unsupported file type: {file_extension}")
+                                
+                                cleaned_text = clean_ocr_text(raw_text)
+                                
+                                # Pass cleaned text to LLM for invoice extraction
+                                llm_response = None
+                                invoice_data = None
+                                ledger_id = None
+                                llm_error_msg = None
+                                
+                                try:
+                                    llm_raw = send_to_llm(cleaned_text)
+                                    llm_cleaned = clean_json_string(llm_raw)
+                                    invoice_data = json.loads(llm_cleaned)
+                                    llm_response = invoice_data
+                                except Exception as llm_error:
+                                    llm_error_msg = str(llm_error)
+                                    llm_response = {"error": llm_error_msg}
+                                
+                                # Store in ledger collection
+                                ledger_entry = {
+                                    "user_id": user_id,
+                                    "voucher_id": voucher_id,
+                                    "file_url": file_url,
+                                    "s3_key": s3_key,
+                                    "data_type": "file",
+                                    "ocr_text": cleaned_text,
+                                    "invoice_data": invoice_data if invoice_data else None,
+                                    "llm_error": llm_error_msg,
+                                    "processing_status": "success" if invoice_data else "llm_failed",
+                                    "created_at": datetime.utcnow()
+                                }
+                                ledger_result = ledger_collection.insert_one(ledger_entry)
+                                ledger_id = str(ledger_result.inserted_id)
+                                
+                                voucher_ocr_results.append({
+                                    "file_url": file_url,
+                                    "s3_key": s3_key,
+                                    "data_type": "file",
+                                    "ledger_id": ledger_id,
+                                    "status": "success"
+                                })
+                                
+                            except Exception as e:
+                                voucher_ocr_results.append({
+                                    "file_url": file_url,
+                                    "s3_key": s3_key,
+                                    "data_type": "file",
+                                    "status": "failed",
+                                    "error": str(e)
+                                })
             
             # Check if all files were successfully processed
             all_success = all(file["status"] == "success" for file in voucher_ocr_results)

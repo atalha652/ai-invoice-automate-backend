@@ -1113,3 +1113,117 @@ async def get_forwarding_history(voucher_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
+
+
+
+from typing import Optional, List, Dict, Any
+class EmailsInput(BaseModel):
+    user_id: str = Field(..., description="User ID of the person uploading the voucher")
+    emails: List[Dict[str, Any]]
+
+def convert_to_toon(obj: Dict[str, Any]) -> str:
+    """
+    Convert a dictionary object to Token-Oriented Object Notation (TOON)
+    TOON format: key1:value1|key2:value2|key3:value3
+    """
+    tokens = []
+    for key, value in obj.items():
+        if value is None:
+            tokens.append(f"{key}:null")
+        elif isinstance(value, str):
+            # Escape pipe characters in strings
+            escaped_value = value.replace("|", "\\|")
+            tokens.append(f"{key}:{escaped_value}")
+        else:
+            tokens.append(f"{key}:{value}")
+    return "|".join(tokens)
+
+@router.post("/gmail-data")
+async def convert_emails_to_toon(emails_input: EmailsInput):
+    """
+    Convert email JSON objects to Token-Oriented Object Notation (TOON) and store in vouchers collection.
+    
+    Field Mapping:
+    - sender_name -> title
+    - subject -> description
+    - purchase_type -> category
+    - merchant -> additional metadata
+    
+    - **user_id**: User ID of the person uploading the voucher
+    - **emails**: List of email objects to convert and store
+    
+    Returns voucher IDs and TOON-formatted data
+    """
+    try:
+        stored_vouchers = []
+        
+        for email in emails_input.emails:
+            # Convert email to TOON format
+            toon_string = convert_to_toon(email)
+            
+            # Create voucher record with field mapping
+            new_voucher = {
+                "user_id": emails_input.user_id,
+                "status": "pending",
+                "OCR": "not_applicable",  # TOON data doesn't need OCR
+                "data_format": "toon",  # Mark this as TOON format voucher
+                "created_at": datetime.utcnow(),
+                "files": [{
+                    "name": f"email_{email.get('id', 'unknown')}.toon",
+                    "toon_data": toon_string,
+                    "original_email": email
+                }]
+            }
+            
+            # Map email fields to voucher fields
+            if email.get("sender_name"):
+                new_voucher["title"] = email.get("sender_name")
+            
+            if email.get("subject"):
+                new_voucher["description"] = email.get("subject")
+            
+            if email.get("purchase_type"):
+                new_voucher["category"] = email.get("purchase_type")
+            
+            # Add additional email metadata
+            if email.get("merchant"):
+                new_voucher["merchant"] = email.get("merchant")
+            
+            if email.get("amount"):
+                new_voucher["amount"] = email.get("amount")
+            
+            if email.get("currency"):
+                new_voucher["currency"] = email.get("currency")
+            
+            if email.get("order_number"):
+                new_voucher["order_number"] = email.get("order_number")
+            
+            if email.get("sender_email"):
+                new_voucher["sender_email"] = email.get("sender_email")
+            
+            if email.get("date"):
+                new_voucher["email_date"] = email.get("date")
+            
+            # Insert into vouchers collection
+            result = voucher_collection.insert_one(new_voucher)
+            voucher_id = str(result.inserted_id)
+            
+            stored_vouchers.append({
+                "voucher_id": voucher_id,
+                "email_id": email.get("id"),
+                "title": new_voucher.get("title"),
+                "description": new_voucher.get("description"),
+                "category": new_voucher.get("category"),
+                "merchant": new_voucher.get("merchant"),
+                "toon_data": toon_string
+            })
+        
+        return {
+            "success": True,
+            "count": len(stored_vouchers),
+            "message": f"Successfully stored {len(stored_vouchers)} vouchers",
+            "vouchers": stored_vouchers
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error converting to TOON and storing: {str(e)}")
