@@ -89,15 +89,78 @@ async def get_ledger_by_user(
 ):
     """
     Get all ledger entries for a specific user.
+    Fetches from both 'ledger' (OCR-based) and 'ledger_entries' (accounting-based) collections.
     Example: GET /accounting/ledgers/user/123
     """
     try:
-        # Build query to find all ledger entries for this user
-        query = {"user_id": user_id}
-        
-        # Get total count
-        total_count = ledger_collection.count_documents(query)
-        
+        # Get user's organization_id
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        organization_id = str(user.get("organization_id", user_id)) if user else user_id
+        # Query 1: Fetch from old 'ledger' collection (OCR-based ledger)
+        query_ocr = {"user_id": user_id}
+        ocr_ledger_entries = list(ledger_collection.find(query_ocr).sort("created_at", -1))
+
+        # Format OCR entries - keep original format
+        for entry in ocr_ledger_entries:
+            entry["_id"] = str(entry["_id"])
+            if isinstance(entry.get("created_at"), datetime):
+                entry["created_at"] = entry["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+
+        # Query 2: Fetch from new 'ledger_entries' collection (accounting ledger)
+        ledger_entries_collection = db["ledger_entries"]
+        query_accounting = {"organization_id": organization_id}
+        accounting_ledger_entries = list(ledger_entries_collection.find(query_accounting).sort("created_at", -1))
+
+        # Format accounting entries to match OCR ledger structure
+        formatted_accounting_entries = []
+        for entry in accounting_ledger_entries:
+            # Convert accounting ledger to display format that matches OCR structure
+            formatted_entry = {
+                "_id": str(entry["_id"]),
+                "user_id": user_id,
+                "voucher_id": entry.get("journal_entry_id", ""),
+                "file_name": f"Bank Transaction - {entry.get('reference', 'N/A')}",
+                "data_type": "bank_transaction",
+                "ocr_text": entry.get("description", ""),
+                "invoice_data": {
+                    "transaction_type": "debit" if entry.get("entry_type") == "DEBIT" else "credit",
+                    "account": {
+                        "account_code": entry.get("account_code", ""),
+                        "account_name": entry.get("account_name", "")
+                    },
+                    "invoice": {
+                        "invoice_number": entry.get("reference", ""),
+                        "invoice_date": entry.get("transaction_date").strftime("%Y-%m-%d") if isinstance(entry.get("transaction_date"), datetime) else str(entry.get("transaction_date", "")),
+                        "due_date": "",
+                        "amount_in_words": ""
+                    },
+                    "items": [
+                        {
+                            "description": entry.get("description", ""),
+                            "qty": 1,
+                            "unit_price": entry.get("amount", 0),
+                            "subtotal": entry.get("amount", 0)
+                        }
+                    ],
+                    "totals": {
+                        "total": entry.get("amount", 0),
+                        "running_balance": entry.get("running_balance", 0)
+                    }
+                },
+                "llm_error": None,
+                "processing_status": "success",
+                "created_at": entry.get("created_at").strftime("%Y-%m-%d %H:%M:%S") if isinstance(entry.get("created_at"), datetime) else str(entry.get("created_at", ""))
+            }
+            formatted_accounting_entries.append(formatted_entry)
+
+        # Combine both lists
+        all_entries = ocr_ledger_entries + formatted_accounting_entries
+
+        # Sort combined list by created_at (newest first)
+        all_entries.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+        total_count = len(all_entries)
+
         if total_count == 0:
             return {
                 "user_id": user_id,
@@ -105,22 +168,14 @@ async def get_ledger_by_user(
                 "total_count": 0,
                 "message": "No ledger entries found for this user"
             }
-        
-        # Execute query - get all entries sorted by created_at descending
-        ledger_entries = list(ledger_collection.find(query).sort("created_at", -1))
-        
-        # Format response
-        for entry in ledger_entries:
-            entry["_id"] = str(entry["_id"])
-            if isinstance(entry.get("created_at"), datetime):
-                entry["created_at"] = entry["created_at"].strftime("%Y-%m-%d %H:%M:%S")
-        
+
+        # Return in original format (backward compatible)
         return {
             "user_id": user_id,
-            "entries": ledger_entries,
+            "entries": all_entries,
             "total_count": total_count
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving ledger entries: {str(e)}")
 
