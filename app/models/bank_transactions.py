@@ -44,6 +44,7 @@ class TransactionStatus(str, Enum):
     MATCHED = "matched"
     UNMATCHED = "unmatched"
     RECONCILED = "reconciled"
+    PROCESSED = "processed"
     DISPUTED = "disputed"
 
 

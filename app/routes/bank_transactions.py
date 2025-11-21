@@ -480,12 +480,12 @@ async def convert_transactions_to_ledger(
                             {"$set": {"current_balance": running_balance}}
                         )
 
-                # Update transaction with ledger entry reference
+                # Update transaction with ledger entry reference and mark as processed
                 bank_repo.db["bank_transactions"].update_one(
                     {"_id": ObjectId(trans_id)},
                     {"$set": {
                         "ledger_entry_id": journal_entry_id,
-                        "status": "reconciled",
+                        "status": "processed",
                         "updated_at": datetime.utcnow()
                     }}
                 )
