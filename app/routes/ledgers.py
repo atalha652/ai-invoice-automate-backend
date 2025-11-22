@@ -1,5 +1,6 @@
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from PIL import Image
 import pytesseract
 import io
@@ -178,6 +179,160 @@ async def get_ledger_by_user(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving ledger entries: {str(e)}")
+
+
+@router.get("/user/{user_id}/export-pdf")
+async def export_ledger_pdf(
+    user_id: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    entry_type: Optional[str] = "all"
+):
+    """
+    Export ledger entries as PDF file (direct download)
+
+    Query Parameters:
+    - from_date (optional): Filter entries from this date (YYYY-MM-DD)
+    - to_date (optional): Filter entries up to this date (YYYY-MM-DD)
+    - entry_type (optional): Filter by type - 'bank_transaction', 'toon', or 'all' (default: 'all')
+
+    Returns: PDF file as direct download
+    """
+    try:
+        from app.utils.pdf_generator import generate_ledger_pdf
+
+        # Get user's organization_id
+        user = users_collection.find_one({"_id": ObjectId(user_id)})
+        organization_id = str(user.get("organization_id", user_id)) if user else user_id
+
+        # Query 1: Fetch from old 'ledger' collection (OCR-based ledger)
+        query_ocr = {"user_id": user_id}
+        ocr_ledger_entries = list(ledger_collection.find(query_ocr).sort("created_at", -1))
+
+        # Format OCR entries - keep original format
+        for entry in ocr_ledger_entries:
+            entry["_id"] = str(entry["_id"])
+            if isinstance(entry.get("created_at"), datetime):
+                entry["created_at"] = entry["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+
+        # Query 2: Fetch from new 'ledger_entries' collection (accounting ledger)
+        ledger_entries_collection = db["ledger_entries"]
+        query_accounting = {"organization_id": organization_id}
+        accounting_ledger_entries = list(ledger_entries_collection.find(query_accounting).sort("created_at", -1))
+
+        # Format accounting entries to match OCR ledger structure
+        formatted_accounting_entries = []
+        for entry in accounting_ledger_entries:
+            # Convert accounting ledger to display format that matches OCR structure
+            formatted_entry = {
+                "_id": str(entry["_id"]),
+                "user_id": user_id,
+                "voucher_id": entry.get("journal_entry_id", ""),
+                "file_name": f"Bank Transaction - {entry.get('reference', 'N/A')}",
+                "data_type": "bank_transaction",
+                "ocr_text": entry.get("description", ""),
+                "invoice_data": {
+                    "transaction_type": "debit" if entry.get("entry_type") == "DEBIT" else "credit",
+                    "account": {
+                        "account_code": entry.get("account_code", ""),
+                        "account_name": entry.get("account_name", "")
+                    },
+                    "invoice": {
+                        "invoice_number": entry.get("reference", ""),
+                        "invoice_date": entry.get("transaction_date").strftime("%Y-%m-%d") if isinstance(entry.get("transaction_date"), datetime) else str(entry.get("transaction_date", "")),
+                        "due_date": "",
+                        "amount_in_words": ""
+                    },
+                    "items": [
+                        {
+                            "description": entry.get("description", ""),
+                            "qty": 1,
+                            "unit_price": entry.get("amount", 0),
+                            "subtotal": entry.get("amount", 0)
+                        }
+                    ],
+                    "totals": {
+                        "total": entry.get("amount", 0),
+                        "running_balance": entry.get("running_balance", 0)
+                    }
+                },
+                "llm_error": None,
+                "processing_status": "success",
+                "created_at": entry.get("created_at").strftime("%Y-%m-%d %H:%M:%S") if isinstance(entry.get("created_at"), datetime) else str(entry.get("created_at", ""))
+            }
+            formatted_accounting_entries.append(formatted_entry)
+
+        # Combine both lists
+        all_entries = ocr_ledger_entries + formatted_accounting_entries
+
+        # Apply filters
+        filtered_entries = []
+        for entry in all_entries:
+            # Filter by entry type
+            if entry_type != "all":
+                if entry.get("data_type") != entry_type:
+                    continue
+
+            # Filter by date range
+            entry_date_str = entry.get("created_at", "")
+            if from_date or to_date:
+                try:
+                    # Parse entry date
+                    entry_date = datetime.strptime(entry_date_str[:10], "%Y-%m-%d")
+
+                    if from_date:
+                        from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+                        if entry_date < from_dt:
+                            continue
+
+                    if to_date:
+                        to_dt = datetime.strptime(to_date, "%Y-%m-%d")
+                        if entry_date > to_dt:
+                            continue
+                except:
+                    # If date parsing fails, include the entry
+                    pass
+
+            filtered_entries.append(entry)
+
+        # Sort by created_at (newest first)
+        filtered_entries.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+        if not filtered_entries:
+            raise HTTPException(status_code=404, detail="No ledger entries found matching the criteria")
+
+        # Prepare user info and filters for PDF
+        user_info = {
+            "user_id": user_id,
+            "organization_id": organization_id
+        }
+
+        filters = {
+            "from_date": from_date,
+            "to_date": to_date,
+            "entry_type": entry_type
+        }
+
+        # Generate PDF
+        pdf_buffer = generate_ledger_pdf(filtered_entries, user_info, filters)
+
+        # Create filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"ledger_export_{user_id}_{timestamp}.pdf"
+
+        # Return PDF as streaming response with download headers
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating PDF: {str(e)}")
 
 
 @router.put("/{ledger_id}")
