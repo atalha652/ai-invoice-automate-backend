@@ -186,7 +186,8 @@ async def export_ledger_pdf(
     user_id: str,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
-    entry_type: Optional[str] = "all"
+    entry_type: Optional[str] = "all",
+    ids: Optional[str] = None
 ):
     """
     Export ledger entries as PDF file (direct download)
@@ -195,6 +196,8 @@ async def export_ledger_pdf(
     - from_date (optional): Filter entries from this date (YYYY-MM-DD)
     - to_date (optional): Filter entries up to this date (YYYY-MM-DD)
     - entry_type (optional): Filter by type - 'bank_transaction', 'toon', or 'all' (default: 'all')
+    - ids (optional): Comma-separated list of specific entry IDs to export (e.g., "id1,id2,id3")
+                     When provided, only these specific entries will be exported
 
     Returns: PDF file as direct download
     """
@@ -205,8 +208,20 @@ async def export_ledger_pdf(
         user = users_collection.find_one({"_id": ObjectId(user_id)})
         organization_id = str(user.get("organization_id", user_id)) if user else user_id
 
+        # Parse specific IDs if provided
+        specific_ids = []
+        if ids:
+            specific_ids = [id.strip() for id in ids.split(",") if id.strip()]
+
         # Query 1: Fetch from old 'ledger' collection (OCR-based ledger)
-        query_ocr = {"user_id": user_id}
+        if specific_ids:
+            # Fetch specific entries by IDs
+            ocr_ids = [ObjectId(id) for id in specific_ids if ObjectId.is_valid(id)]
+            query_ocr = {"_id": {"$in": ocr_ids}, "user_id": user_id}
+        else:
+            # Fetch all entries for user
+            query_ocr = {"user_id": user_id}
+
         ocr_ledger_entries = list(ledger_collection.find(query_ocr).sort("created_at", -1))
 
         # Format OCR entries - keep original format
@@ -217,7 +232,14 @@ async def export_ledger_pdf(
 
         # Query 2: Fetch from new 'ledger_entries' collection (accounting ledger)
         ledger_entries_collection = db["ledger_entries"]
-        query_accounting = {"organization_id": organization_id}
+        if specific_ids:
+            # Fetch specific entries by IDs
+            accounting_ids = [ObjectId(id) for id in specific_ids if ObjectId.is_valid(id)]
+            query_accounting = {"_id": {"$in": accounting_ids}, "organization_id": organization_id}
+        else:
+            # Fetch all entries for organization
+            query_accounting = {"organization_id": organization_id}
+
         accounting_ledger_entries = list(ledger_entries_collection.find(query_accounting).sort("created_at", -1))
 
         # Format accounting entries to match OCR ledger structure
