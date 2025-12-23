@@ -253,6 +253,7 @@ class LedgerEntry(BaseModel):
     running_balance: Decimal
     description: str
     reference: Optional[str] = None
+    modelo_id: Optional[str] = None
     transaction_date: datetime
     posted_at: datetime
     created_at: datetime = Field(default_factory=datetime.utcnow)

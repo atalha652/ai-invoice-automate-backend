@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from app.routes import (
     api, auth, project, report, accounting, voucher, ledger, ocr,
-    gmail_api, ledgers, outlook_api, dashboard, bank_transactions, billing
+    gmail_api, ledgers, outlook_api, dashboard, bank_transactions, billing, modelo
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
@@ -68,6 +68,9 @@ app.include_router(dashboard.router, prefix="/api")
 # New routes - Bank & Billing
 app.include_router(bank_transactions.router, prefix="/api")
 app.include_router(billing.router, prefix="/api")
+
+# Modelo routes
+app.include_router(modelo.router, prefix="/api")
 
 
 @app.get("/")

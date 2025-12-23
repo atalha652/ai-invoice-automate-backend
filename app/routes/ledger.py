@@ -61,6 +61,7 @@ class LedgerEntry(BaseModel):
     entry_type: EntryType = Field(..., description="Debit or Credit")
     amount: float = Field(..., gt=0, description="Entry amount (must be positive)")
     description: Optional[str] = Field(None, description="Entry description")
+    modelo_id: Optional[str] = Field(None, description="Optional modelo _id reference")
 
     @validator('amount')
     def validate_amount(cls, v):
@@ -355,6 +356,94 @@ async def create_manual_journal_entry(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating journal entry: {str(e)}")
+
+
+@router.post("/entries")
+async def create_ledger_entry(
+    entry_data: dict,
+    user_id: str = Query(..., description="User ID creating the entry")
+):
+    """
+    Create ledger entry directly (bypassing journal entry).
+    Optionally include modelo_id in the entry_data.
+    """
+    try:
+        entry_data["created_at"] = datetime.utcnow()
+        entry_data["created_by"] = user_id
+        
+        # If modelo_id provided, validate it exists
+        if entry_data.get("modelo_id"):
+            modelo = db["modelos"].find_one({"_id": ObjectId(entry_data["modelo_id"])})
+            if not modelo:
+                raise HTTPException(status_code=404, detail="Modelo not found")
+        
+        result = ledger_collection.insert_one(entry_data)
+        
+        return {
+            "message": "Ledger entry created successfully",
+            "ledger_entry_id": str(result.inserted_id),
+            "account_code": entry_data.get("account_code"),
+            "amount": entry_data.get("amount"),
+            "modelo_id": entry_data.get("modelo_id")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating ledger entry: {str(e)}")
+
+
+@router.put("/entries/{entry_id}/modelo")
+async def update_ledger_modelo(
+    entry_id: str,
+    modelo_id: str = Query(..., description="Modelo _id to assign"),
+    user_id: str = Query(..., description="User ID")
+):
+    """
+    Update ledger entry with a modelo by its _id.
+    Assigns the modelo_id to the ledger entry.
+    """
+    try:
+        # Validate entry exists
+        if not ObjectId.is_valid(entry_id):
+            raise HTTPException(status_code=400, detail="Invalid entry ID format")
+        
+        entry = ledger_collection.find_one({"_id": ObjectId(entry_id)})
+        if not entry:
+            raise HTTPException(status_code=404, detail="Ledger entry not found")
+        
+        # Validate modelo exists
+        if not ObjectId.is_valid(modelo_id):
+            raise HTTPException(status_code=400, detail="Invalid modelo ID format")
+        
+        modelo = db["modelos"].find_one({"_id": ObjectId(modelo_id)})
+        if not modelo:
+            raise HTTPException(status_code=404, detail="Modelo not found")
+        
+        # Update ledger entry with modelo
+        result = ledger_collection.update_one(
+            {"_id": ObjectId(entry_id)},
+            {"$set": {
+                "modelo_id": modelo_id,
+                "updated_at": datetime.utcnow()
+            }}
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=500, detail="Failed to update ledger entry")
+        
+        return {
+            "message": "Modelo assigned successfully",
+            "entry_id": entry_id,
+            "modelo_id": modelo_id,
+            "modelo_no": modelo.get("modelo_no"),
+            "modelo_name": modelo.get("name")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/")

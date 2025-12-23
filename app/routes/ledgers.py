@@ -157,6 +157,23 @@ async def get_ledger_by_user(
         # Combine both lists
         all_entries = ocr_ledger_entries + formatted_accounting_entries
 
+        # Enrich entries with modelo details if modelo_id exists
+        for entry in all_entries:
+            if entry.get("modelo_id"):
+                try:
+                    modelo = db["modelos"].find_one({"_id": ObjectId(entry["modelo_id"])})
+                    if modelo:
+                        entry["modelo"] = {
+                            "_id": str(modelo["_id"]),
+                            "modelo_no": modelo.get("modelo_no"),
+                            "name": modelo.get("name"),
+                            "periodicity": modelo.get("periodicity"),
+                            "deadline": modelo.get("deadline")
+                        }
+                except Exception as e:
+                    # If lookup fails, just continue without modelo details
+                    pass
+
         # Sort combined list by created_at (newest first)
         all_entries.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
@@ -441,6 +458,82 @@ async def update_ledger_entry(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error updating ledger entry: {str(e)}")
+
+
+@router.put("/{entry_id}/modelo")
+async def update_ledger_modelo(
+    entry_id: str,
+    modelo_id: str = None,
+    user_id: str = None
+):
+    """
+    Update ledger entry with a modelo by its _id.
+    Assigns the modelo_id to the ledger entry.
+    Checks both 'ledger' and 'ledger_entries' collections.
+    """
+    try:
+        # Validate entry exists
+        if not ObjectId.is_valid(entry_id):
+            raise HTTPException(status_code=400, detail="Invalid entry ID format")
+        
+        # Check both collections
+        ledger_entries_collection = db["ledger_entries"]
+        entry = ledger_entries_collection.find_one({"_id": ObjectId(entry_id)})
+        collection_used = "ledger_entries"
+        
+        # If not in ledger_entries, check ledger
+        if not entry:
+            entry = ledger_collection.find_one({"_id": ObjectId(entry_id)})
+            collection_used = "ledger"
+        
+        if not entry:
+            raise HTTPException(status_code=404, detail="Ledger entry not found in either collection")
+        
+        # Validate modelo exists if provided
+        if modelo_id:
+            if not ObjectId.is_valid(modelo_id):
+                raise HTTPException(status_code=400, detail="Invalid modelo ID format")
+            
+            modelo = db["modelos"].find_one({"_id": ObjectId(modelo_id)})
+            if not modelo:
+                raise HTTPException(status_code=404, detail="Modelo not found")
+        
+            # Update in the collection where entry was found
+            if collection_used == "ledger_entries":
+                result = ledger_entries_collection.update_one(
+                    {"_id": ObjectId(entry_id)},
+                    {"$set": {
+                        "modelo_id": modelo_id,
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+            else:
+                result = ledger_collection.update_one(
+                    {"_id": ObjectId(entry_id)},
+                    {"$set": {
+                        "modelo_id": modelo_id,
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+            
+            if result.modified_count == 0:
+                raise HTTPException(status_code=500, detail="Failed to update ledger entry")
+            
+            return {
+                "message": "Modelo assigned successfully",
+                "entry_id": entry_id,
+                "collection": collection_used,
+                "modelo_id": modelo_id,
+                "modelo_no": modelo.get("modelo_no"),
+                "modelo_name": modelo.get("name")
+            }
+        
+        raise HTTPException(status_code=400, detail="modelo_id is required")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("/{ledger_id}")
